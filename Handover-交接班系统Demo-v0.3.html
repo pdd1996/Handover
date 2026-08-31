@@ -1,0 +1,1273 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Handover · 新院区交接班 Demo v0.3（撤回 + 异议闭环）</title>
+<style>
+:root{
+  --bg:#EEF1F4; --card:#FFFFFF; --ink:#1F2A37; --muted:#6B7280; --line:#E2E6EB;
+  --primary:#0E7C66; --primary-ink:#0B5F4F; --primary-soft:#E3F2EE;
+  --danger:#C4372E; --danger-soft:#FBEAE8;
+  --warn:#B7791F; --warn-soft:#FBF1DE;
+  --ok:#15803D; --ok-soft:#E7F4EA;
+  --radius:14px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+  background:var(--bg); color:var(--ink); font-size:17px; line-height:1.55;
+  display:flex; justify-content:center; align-items:flex-start; gap:28px; padding:28px 16px;
+  touch-action:manipulation;
+}
+.guide{width:310px;position:sticky;top:28px;display:none}
+.guide h1{font-size:20px;margin-bottom:4px}
+.guide .sub{color:var(--muted);font-size:13px;margin-bottom:14px}
+.guide ol{padding-left:20px;font-size:14px;color:var(--ink);display:flex;flex-direction:column;gap:8px}
+.guide li b{color:var(--primary-ink)}
+.guide .new{margin-top:14px;background:var(--primary-soft);border:1px solid #BFE0D6;border-radius:12px;padding:12px 14px;font-size:13px;color:var(--primary-ink)}
+.guide .tips{margin-top:12px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;font-size:13px;color:var(--muted)}
+.guide .tips b{color:var(--ink)}
+.phone{width:420px;height:880px;background:#111827;border-radius:44px;padding:12px;box-shadow:0 24px 60px rgba(15,23,42,.25);flex-shrink:0;position:relative;overflow:hidden}
+.app{width:100%;height:100%;background:var(--bg);border-radius:34px;overflow-y:auto;overflow-x:hidden;position:relative;-webkit-overflow-scrolling:touch}
+@media (max-width:860px){
+  body{padding:0;gap:0;display:block}
+  .phone{width:100%;height:auto;border-radius:0;padding:0;box-shadow:none}
+  .app{height:100dvh;border-radius:0}
+  .guide{display:none}
+}
+@media (min-width:861px){ .guide{display:block} }
+.scr{display:none;min-height:100%;padding-bottom:40px}
+.scr.show{display:block}
+.topbar{position:sticky;top:0;z-index:20;background:var(--primary);color:#fff;padding:14px 16px 10px}
+.topbar .row1{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.topbar .title{font-size:19px;font-weight:700}
+.topbar .who{font-size:13px;opacity:.92}
+.chip{display:inline-flex;align-items:center;gap:5px;font-size:12px;padding:3px 9px;border-radius:99px;background:rgba(255,255,255,.16)}
+.chip.ok{background:rgba(255,255,255,.22)}
+.restart{background:none;border:1px solid rgba(255,255,255,.5);color:#fff;border-radius:99px;font-size:12px;padding:3px 10px;cursor:pointer}
+.progress-wrap{margin-top:10px;background:rgba(0,0,0,.18);height:8px;border-radius:99px;overflow:hidden}
+.progress-bar{height:100%;background:#FFD666;border-radius:99px;width:0%;transition:width .3s}
+.progress-txt{font-size:12px;margin-top:4px;opacity:.95}
+.banner{margin:10px 14px 0;border-radius:10px;padding:10px 12px;font-size:14px;font-weight:600}
+.banner.warn{background:var(--warn-soft);color:var(--warn)}
+.banner.bad{background:var(--danger-soft);color:var(--danger)}
+.sechead{position:sticky;top:0;z-index:20;background:var(--primary);color:#fff;padding:13px 14px;display:flex;align-items:center;gap:12px}
+.sechead .back{background:rgba(255,255,255,.16);border:none;color:#fff;border-radius:10px;padding:9px 14px;font-size:15px;font-weight:600;cursor:pointer}
+.sechead .st{font-size:17.5px;font-weight:700}
+.sechead .ss{font-size:12px;opacity:.88}
+.donebar{padding:2px 14px 26px}
+.wrap{padding:14px}
+.card{background:var(--card);border-radius:var(--radius);padding:14px 14px 16px;margin-bottom:12px;border:1px solid var(--line)}
+.sec-head{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+.sec-head .no{background:var(--primary-soft);color:var(--primary-ink);font-weight:700;font-size:13px;border-radius:8px;padding:2px 8px}
+.sec-head .name{font-size:18px;font-weight:700}
+.sec-head .badge{margin-left:auto;font-size:12px;border-radius:99px;padding:2px 9px}
+.badge.red{background:var(--danger-soft);color:var(--danger);font-weight:700}
+.badge.ok{background:var(--ok-soft);color:var(--ok)}
+.hint{font-size:12.5px;color:var(--muted);margin:-4px 0 10px}
+.homecard{display:flex;align-items:center;gap:12px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:13px 14px;margin-bottom:10px;cursor:pointer;width:100%;text-align:left}
+.homecard:active{border-color:var(--primary)}
+.hc-no{width:38px;height:38px;border-radius:11px;background:var(--primary-soft);color:var(--primary-ink);font-weight:800;display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0}
+.hc-no.time{background:#FFF3DC;color:var(--warn)}
+.hc-t{font-size:16.5px;font-weight:700}
+.hc-s{font-size:12.5px;color:var(--muted)}
+.hc-badge{margin-left:auto;font-size:12.5px;border-radius:99px;padding:3px 10px;font-weight:700;white-space:nowrap;flex-shrink:0}
+.hc-badge.todo{background:#EEF1F4;color:var(--muted)}
+.hc-badge.done{background:var(--ok-soft);color:var(--ok)}
+.hc-badge.bad{background:var(--danger-soft);color:var(--danger)}
+.field{padding:10px 0;border-top:1px dashed var(--line)}
+.field:first-of-type{border-top:none}
+.field label{display:block;font-size:15px;font-weight:600;margin-bottom:6px}
+.field label .unit{color:var(--muted);font-weight:400;font-size:13px;margin-left:6px}
+.io{display:flex;align-items:center;gap:10px}
+.io input[type=text],.io input[type=number],textarea,select{
+  flex:1;min-width:0;border:1.5px solid var(--line);border-radius:10px;padding:11px 12px;
+  font-size:19px;font-weight:600;color:var(--ink);background:#fff;width:100%
+}
+input.missing,textarea.missing{border-color:var(--danger);background:var(--danger-soft)}
+.prev-val{font-size:12.5px;color:var(--muted);white-space:nowrap}
+.auto-calc{margin-top:7px;background:var(--primary-soft);color:var(--primary-ink);border-radius:10px;padding:7px 10px;font-size:14px;font-weight:600;overflow:hidden}
+.auto-calc small{font-weight:400;opacity:.8}
+.auto-calc.manual{background:var(--warn-soft);color:var(--warn)}
+.ovr{border:none;background:rgba(255,255,255,.75);color:inherit;border-radius:8px;padding:2px 10px;font-size:12.5px;font-weight:700;cursor:pointer;float:right;margin-left:6px}
+.rule-note{margin-top:7px;border-radius:10px;padding:8px 10px;font-size:13.5px;font-weight:600}
+.rule-note.high{background:var(--danger-soft);color:var(--danger)}
+.rule-note.low{background:var(--warn-soft);color:var(--warn)}
+.rule-note .why{display:block;font-weight:400;font-size:12.5px;margin-top:2px}
+.field.flagged{outline:2px solid var(--danger);outline-offset:2px;border-radius:12px}
+.field.flagged-warn{outline:2px solid var(--warn);outline-offset:2px;border-radius:12px}
+.field.dim{opacity:.45}
+.seg{display:flex;gap:8px}
+.seg button{flex:1;border:1.5px solid var(--line);background:#fff;border-radius:10px;padding:11px 0;font-size:16px;font-weight:600;color:var(--muted);cursor:pointer}
+.seg button.on{border-color:var(--primary);background:var(--primary-soft);color:var(--primary-ink)}
+.seg button.on.bad{border-color:var(--danger);background:var(--danger-soft);color:var(--danger)}
+.exc-note{margin-top:8px}
+.checks{display:flex;flex-wrap:wrap;gap:8px}
+.checks label{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line);border-radius:99px;padding:9px 14px;font-size:15px;font-weight:600;cursor:pointer;margin-bottom:0}
+.checks input{width:18px;height:18px;accent-color:var(--primary)}
+.checks label.on{border-color:var(--primary);background:var(--primary-soft);color:var(--primary-ink)}
+.lift-row{display:flex;align-items:center;gap:10px;padding:10px 0;border-top:1px dashed var(--line)}
+.lift-row:first-of-type{border-top:none}
+.lift-row .lname{flex:1;font-size:15px;font-weight:600}
+.lift-row .exp{font-size:12px;border-radius:99px;padding:2px 8px}
+.exp.run{background:var(--ok-soft);color:var(--ok)}
+.exp.stop{background:#EEF1F4;color:var(--muted)}
+.lift-row .seg{flex:1.3}
+.lift-row .seg button{padding:9px 0;font-size:14px}
+.btn{display:block;width:100%;border:none;border-radius:12px;padding:15px 0;font-size:18px;font-weight:700;cursor:pointer;text-align:center}
+.btn.primary{background:var(--primary);color:#fff}
+.btn.ghost{background:#fff;color:var(--primary-ink);border:1.5px solid var(--primary)}
+.btn.light{background:#fff;color:var(--ink);border:1.5px solid var(--line)}
+.btn.danger-o{background:#fff;color:var(--danger);border:1.5px solid var(--danger)}
+.btn:disabled{opacity:.45}
+.btn-row{display:flex;gap:10px}
+.login{padding:60px 24px 24px}
+.login .logo{width:72px;height:72px;border-radius:20px;background:var(--primary);color:#fff;font-size:30px;font-weight:800;display:flex;align-items:center;justify-content:center;margin:0 auto 14px}
+.login h1{text-align:center;font-size:22px}
+.login .sub{text-align:center;color:var(--muted);font-size:14px;margin:6px 0 26px}
+.acct{display:flex;align-items:center;gap:12px;background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:14px;margin-bottom:12px;cursor:pointer;width:100%;text-align:left}
+.acct:hover{border-color:var(--primary)}
+.acct .av{width:46px;height:46px;border-radius:50%;background:var(--primary-soft);color:var(--primary-ink);font-weight:700;display:flex;align-items:center;justify-content:center;font-size:17px;flex-shrink:0}
+.acct .an{font-size:17px;font-weight:700}
+.acct .ar{font-size:13px;color:var(--muted)}
+.acct .go{margin-left:auto;color:var(--muted);font-size:20px}
+.login .note{font-size:12.5px;color:var(--muted);text-align:center;margin-top:14px}
+.veil{position:absolute;inset:0;background:rgba(17,24,39,.45);display:none;z-index:40;border-radius:34px}
+.veil.show{display:block}
+.sheet{position:absolute;left:0;right:0;bottom:0;background:var(--bg);border-radius:20px 20px 0 0;max-height:82%;overflow-y:auto;padding:16px;z-index:41;transform:translateY(100%);transition:transform .25s}
+.sheet.show{transform:translateY(0)}
+.sheet h2{font-size:19px;margin-bottom:4px}
+.sheet .grip{width:44px;height:4px;border-radius:2px;background:#D1D5DB;margin:0 auto 12px}
+.sum{display:flex;gap:10px;margin:10px 0 14px}
+.sum .cell{flex:1;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px;text-align:center}
+.sum .n{font-size:22px;font-weight:800}
+.sum .t{font-size:12.5px;color:var(--muted)}
+.abn{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--danger);border-radius:10px;padding:10px 12px;margin-bottom:8px;font-size:14px}
+.abn.mid{border-left-color:var(--warn)}
+.abn b{display:block}
+.abn span{color:var(--muted);font-size:12.5px}
+.modal{position:absolute;left:50%;top:32%;transform:translateX(-50%);width:84%;background:#fff;border-radius:16px;padding:18px;z-index:45;display:none}
+.modal.show{display:block}
+.modal h3{font-size:17px;margin-bottom:8px}
+.modal p{font-size:14.5px;color:var(--muted);margin-bottom:14px}
+.modal textarea{margin-bottom:12px}
+.toast{position:absolute;left:50%;bottom:90px;transform:translateX(-50%);background:rgba(17,24,39,.92);color:#fff;font-size:14px;padding:10px 16px;border-radius:99px;z-index:60;display:none;max-width:86%;text-align:center}
+.result{padding:44px 24px 24px;text-align:center}
+.result .ico{width:84px;height:84px;border-radius:50%;margin:0 auto 16px;display:flex;align-items:center;justify-content:center;font-size:40px;color:#fff;background:var(--primary)}
+.result .ico.warn{background:var(--warn)}
+.result h1{font-size:22px;margin-bottom:6px}
+.result .sub{color:var(--muted);font-size:14px;margin-bottom:20px}
+.kv{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:4px 14px;text-align:left;margin-bottom:16px}
+.kv .r{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px dashed var(--line);font-size:14.5px}
+.kv .r:last-child{border-bottom:none}
+.kv .k{color:var(--muted)}
+.kv .v{font-weight:600}
+.withdraw-box{background:var(--card);border:1.5px solid var(--primary);border-radius:14px;padding:14px;text-align:left;margin-bottom:16px}
+.withdraw-box .wt{display:flex;align-items:center;gap:12px}
+.withdraw-box .count{font-size:26px;font-weight:800;color:var(--primary-ink);font-variant-numeric:tabular-nums}
+.todo-card{background:var(--card);border:1.5px solid var(--primary);border-radius:14px;padding:16px;display:flex;align-items:center;gap:12px;cursor:pointer}
+.todo-card .t-ico{width:44px;height:44px;border-radius:12px;background:var(--danger-soft);color:var(--danger);display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:800;flex-shrink:0}
+.todo-card .tt{font-size:16.5px;font-weight:700}
+.todo-card .ts{font-size:13px;color:var(--muted)}
+.know-btn{border:1.5px solid var(--primary);color:var(--primary-ink);background:#fff;border-radius:99px;padding:7px 16px;font-size:14px;font-weight:700;cursor:pointer;flex-shrink:0}
+.know-btn.done{background:var(--primary);color:#fff;border-color:var(--primary)}
+.abn-item{display:flex;align-items:flex-start;gap:10px}
+.abn-item .body{flex:1}
+.sig-box{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:14px;margin-bottom:12px}
+.sig-box .sh{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+.sig-box .sh b{font-size:15px}
+.sig-box .clr{border:1px solid var(--line);background:#fff;border-radius:8px;padding:5px 12px;font-size:13px;color:var(--muted);cursor:pointer}
+canvas.sig{width:100%;height:160px;background:#FBFCFD;border:1.5px dashed #C6CDD5;border-radius:10px;touch-action:none}
+.data-line{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px dashed var(--line);font-size:14px}
+.data-line:last-child{border-bottom:none}
+.data-line .k{color:var(--muted);flex:1}
+.data-line .v{font-weight:600;text-align:right;max-width:55%}
+.stamp{display:inline-block;border:2px solid var(--primary);color:var(--primary);border-radius:8px;padding:3px 10px;font-weight:700;font-size:14px;transform:rotate(-3deg)}
+.ver-tag{display:inline-block;background:var(--primary-soft);color:var(--primary-ink);border-radius:8px;padding:1px 8px;font-size:12.5px;font-weight:700}
+footer.demo-foot{text-align:center;font-size:12px;color:#9AA4AF;padding:10px 16px 26px}
+@keyframes inpflash{0%,100%{box-shadow:0 0 0 4px rgba(196,55,46,.45)}50%{box-shadow:0 0 0 1px rgba(196,55,46,0)}}
+input.flash{animation:inpflash .55s ease-in-out 4}
+.sheet .homecard{text-align:left}
+</style>
+</head>
+<body>
+
+<aside class="guide">
+  <h1>Handover 交接班 Demo v0.3</h1>
+  <div class="sub">对应 PRD v0.2.3 + 技术方案 v0.2</div>
+  <div class="new">
+    <b>本版新增（全部可交互）：</b><br>
+    ① 提交后 <b>10 分钟撤回窗口</b>（带倒计时，撤回→改→重提版本+1）<br>
+    ② <b>异议退回闭环</b>：接班人填原因退回 → 交班人重改 → 接班人看到变更清单与异议记录<br>
+    ③ 交接事项<b>按条拆分逐条"已知晓"</b><br>
+    ④ 用量<b>手工修正留痕</b>（点绿色计算条右侧"修正"）<br>
+    ⑤ 天然气<b>单卡充气</b>防呆、水位按 1/3 号楼拆分<br>
+    ⑥ <b>排班安全阀</b>：登录页勾选"模拟未登记调班"后以施师傅提交 → 弹"排班对账确认"，留痕后放行（PRD v0.2.4）<br>
+    ⑦ 液氧<b>双档阈值</b>：在用罐 &lt;2.5 提示切换罐、&lt;2.0 提示补液；"在用罐"选择后各卡标题动态显示在用/备用；1 号罐同样录压力
+  </div>
+  <ol>
+    <li><b>张师傅登录</b> → 首页 12 张任务卡（同 v0.2）</li>
+    <li><b>提交</b> → 成功页出现<b>撤回倒计时</b>；可撤回改一个读数再提交，看版本号 v2</li>
+    <li><b>模拟次日</b> → 接班人可"已知晓"逐条+签名，也可<b>填异议退回</b>（推荐两条路径各演一遍）</li>
+    <li><b>归档页</b>：版本、异议记录、变更明细全程可追溯</li>
+  </ol>
+  <div class="tips"><b>数据说明：</b>取自 PRD 纸质案例；液氧单位待现场核实，暂按 L 显示。</div>
+</aside>
+
+<div class="phone">
+<div class="app" id="app">
+
+<!-- ═══════════ 登录 ═══════════ -->
+<section class="scr show" id="scr-login">
+  <div class="login">
+    <div class="logo">交</div>
+    <h1>新院区交接班</h1>
+    <div class="sub">总务科 · 移动端（演示版 v0.3）</div>
+    <button class="acct" onclick="login('zhang')">
+      <div class="av">张</div>
+      <div><div class="an">张师傅</div><div class="ar">交班人 · 今日值班（8/27）</div></div>
+      <div class="go">›</div>
+    </button>
+    <button class="acct" onclick="login('shi')">
+      <div class="av">施</div>
+      <div><div class="an">施师傅</div><div class="ar">接班人 · 明日值班（按排班表带出）</div></div>
+      <div class="go">›</div>
+    </button>
+    <label style="display:flex;gap:8px;align-items:center;justify-content:center;font-size:13.5px;color:var(--muted);margin:2px 0 10px;cursor:pointer">
+      <input type="checkbox" id="swap-demo" style="width:16px;height:16px;accent-color:var(--warn)"> 模拟未登记调班（以施师傅身份提交今日交接单）
+    </label>
+    <div class="note">演示环境为系统发号登录；正式版本对接排班表后，<br>登录后自动识别当日交班人 / 待办接班人</div>
+  </div>
+</section>
+
+<!-- ═══════════ 今日首页 ═══════════ -->
+<section class="scr" id="scr-home">
+  <div class="topbar">
+    <div class="row1">
+      <div>
+        <div class="title">今日交接 · 8 月 27 日（周四）</div>
+        <div class="who" id="home-who">张师傅 · 24 小时班 · <span class="ver-tag">v1</span> · 接班 施师傅</div>
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
+        <span class="chip ok">● 已同步</span>
+        <button class="restart" onclick="location.reload()">↻ 重来</button>
+      </div>
+    </div>
+    <div class="progress-wrap"><div class="progress-bar" id="pbar"></div></div>
+    <div class="progress-txt" id="ptxt"></div>
+  </div>
+  <div class="banner warn" id="form-banner" hidden></div>
+  <div class="wrap">
+    <div class="hint" style="margin:2px 0 10px">按巡检路线到点位点开卡片填写即可，内容自动暂存、随时退出；<b>液氧到点各测一次</b>，晚间建议顺路完成电梯核对。</div>
+    <button class="homecard" data-target="scr-s1" onclick="openSec('scr-s1')"><div class="hc-no">水</div><div><div class="hc-t">一 · 水表读数</div><div class="hc-s">表房 · 1 项</div></div><span class="hc-badge done">已填</span></button>
+    <button class="homecard" data-target="scr-s2" onclick="openSec('scr-s2')"><div class="hc-no">电</div><div><div class="hc-t">二 · 双路电表 + 高配房</div><div class="hc-s">表房 · 3 项</div></div><span class="hc-badge done">已填</span></button>
+    <button class="homecard" data-target="scr-s3" onclick="openSec('scr-s3')"><div class="hc-no">气</div><div><div class="hc-t">三 · 天然气剩余量</div><div class="hc-s">锅炉房旁 · 2 项 · 单卡防呆</div></div><span class="hc-badge done">已填</span></button>
+    <button class="homecard" data-target="scr-s4" onclick="openSec('scr-s4')"><div class="hc-no time">8:30</div><div><div class="hc-t">四 · 液氧读数（早）</div><div class="hc-s">液氧站 · 到点任务 · 3 项</div></div><span class="hc-badge done">已填</span></button>
+    <button class="homecard" data-target="scr-s5" onclick="openSec('scr-s5')"><div class="hc-no time">20:30</div><div><div class="hc-t">四 · 液氧读数（晚）</div><div class="hc-s">液氧站 · 到点任务 · 可顺路核对电梯</div></div><span class="hc-badge done">已填</span></button>
+    <button class="homecard" data-target="scr-s6" onclick="openSec('scr-s6')"><div class="hc-no">氧</div><div><div class="hc-t">四 · 气瓶 / 压力 / 气源</div><div class="hc-s">医用气体 · 10 项</div></div><span class="hc-badge bad">异常</span></button>
+    <button class="homecard" data-target="scr-s7" onclick="openSec('scr-s7')"><div class="hc-no">暖</div><div><div class="hc-t">五 · 供暖 / 冷系统</div><div class="hc-s">锅炉房 · 制冷机房 · 夏季工况</div></div><span class="hc-badge done">已填</span></button>
+    <button class="homecard" data-target="scr-s8" onclick="openSec('scr-s8')"><div class="hc-no">泵</div><div><div class="hc-t">六 · 生活水泵（热/冷）</div><div class="hc-s">泵房 · 水位按 1/3 号楼</div></div><span class="hc-badge bad">异常</span></button>
+    <button class="homecard" data-target="scr-s9" onclick="openSec('scr-s9')"><div class="hc-no">风</div><div><div class="hc-t">七 · 新风 / 空调</div><div class="hc-s">各楼层 · 2 项</div></div><span class="hc-badge done">已填</span></button>
+    <button class="homecard" data-target="scr-s10" onclick="openSec('scr-s10')"><div class="hc-no">节</div><div><div class="hc-t">八 · 节能减排</div><div class="hc-s">可留空 · 选填</div></div><span class="hc-badge done">已填</span></button>
+    <button class="homecard" data-target="scr-s11" onclick="openSec('scr-s11')"><div class="hc-no">梯</div><div><div class="hc-t">九 · 电梯一键核对</div><div class="hc-s">7 台 · 按时间表给出预期状态</div></div><span class="hc-badge done">已填</span></button>
+    <button class="homecard" data-target="scr-s12" onclick="openSec('scr-s12')"><div class="hc-no">它</div><div><div class="hc-t">十 · 其它交接事项</div><div class="hc-s">按条拆分 · 接班人逐条确认</div></div><span class="hc-badge done">已填</span></button>
+    <div style="height:8px"></div>
+    <button class="btn primary" id="btn-submit-entry" onclick="openPreview()">全部填完 · 提交（生成预览）</button>
+    <footer class="demo-foot">演示版 · 数据仅存于本页面内存 · 正式版本支持离线暂存与院内网络自动同步</footer>
+  </div>
+</section>
+
+<!-- ═══════════ 板块子页 ═══════════ -->
+<section class="scr" id="scr-s1">
+  <div class="sechead"><button class="back" onclick="goHome()">‹ 首页</button><div><div class="st">一 · 水表读数</div><div class="ss">巡检点位：表房</div></div></div>
+  <div class="wrap secbody">
+    <div class="card">
+      <div class="field" style="border:none">
+        <label>新院区总水表读数<span class="unit">吨</span></label>
+        <div class="io"><input id="w_read" type="text" inputmode="decimal" value="49239" data-prev="48939" data-name="水表读数"><span class="prev-val">上一班 48939</span></div>
+        <div class="auto-calc" id="w_use"></div>
+      </div>
+    </div>
+    <div class="hint">绿色计算条右侧"✎ 修正"可手工改值（PRD F3：必填原因、留痕、不被重算覆盖）。正式版本此处可选拍照留证（F7）。</div>
+  </div>
+  <div class="donebar"><button class="btn ghost" onclick="goHome()">完成 · 返回首页</button></div>
+</section>
+
+<section class="scr" id="scr-s2">
+  <div class="sechead"><button class="back" onclick="goHome()">‹ 首页</button><div><div class="st">二 · 双路电表 + 高配房</div><div class="ss">巡检点位：表房</div></div></div>
+  <div class="wrap secbody">
+    <div class="card">
+      <div class="field">
+        <label>电表 1 · 如意线读数<span class="unit">度</span></label>
+        <div class="io"><input id="e1" type="text" inputmode="decimal" value="21400" data-prev="21000" data-name="如意线读数"><span class="prev-val">上一班 21000</span></div>
+      </div>
+      <div class="field">
+        <label>电表 2 · 工贸线读数<span class="unit">度</span></label>
+        <div class="io"><input id="e2" type="text" inputmode="decimal" value="16670" data-prev="16300" data-name="工贸线读数"><span class="prev-val">上一班 16300</span></div>
+      </div>
+      <div class="auto-calc" id="e_use"></div>
+      <div class="field" data-statusfield>
+        <label>高配房是否正常</label>
+        <div class="seg" id="seg_hp" data-name="高配房"></div>
+        <div class="exc-note" hidden><textarea rows="2" placeholder="异常说明（必填）"></textarea></div>
+      </div>
+    </div>
+  </div>
+  <div class="donebar"><button class="btn ghost" onclick="goHome()">完成 · 返回首页</button></div>
+</section>
+
+<section class="scr" id="scr-s3">
+  <div class="sechead"><button class="back" onclick="goHome()">‹ 首页</button><div><div class="st">三 · 天然气剩余量</div><div class="ss">剩余量递减 · 任一卡增大即按该卡充气处理</div></div></div>
+  <div class="wrap secbody">
+    <div class="card">
+      <div class="field">
+        <label>表 1 · 主卡剩余量<span class="unit">立方米</span></label>
+        <div class="io"><input id="g1" type="text" inputmode="decimal" value="3160" data-prev="3200" data-name="主卡剩余量" data-dir="down"><span class="prev-val">上一班 3200</span></div>
+      </div>
+      <div class="field">
+        <label>表 2 · 副卡剩余量<span class="unit">立方米</span></label>
+        <div class="io"><input id="g2" type="text" inputmode="decimal" value="2845" data-prev="2850" data-name="副卡剩余量" data-dir="down"><span class="prev-val">上一班 2850</span></div>
+      </div>
+      <div class="auto-calc" id="g_use"></div>
+    </div>
+    <div class="hint">试试把主卡改成 3210（大于上一班）：只有该卡按 0 计，副卡照常计算——单卡判定（技术方案 §4.3）。</div>
+  </div>
+  <div class="donebar"><button class="btn ghost" onclick="goHome()">完成 · 返回首页</button></div>
+</section>
+
+<section class="scr" id="scr-s4">
+  <div class="sechead"><button class="back" onclick="goHome()">‹ 首页</button><div><div class="st">液氧读数 · 早 8:30</div><div class="ss">液氧站 · 到点任务</div></div></div>
+  <div class="wrap secbody">
+    <div class="card">
+      <div class="field" style="border:none">
+        <label>在用罐<span class="unit">点按切换 · 标题与用量跟随变化</span></label>
+        <div class="seg tank-seg"></div>
+      </div>
+      <div class="field">
+        <label><span id="lbl_t2_830">2 号罐（在用）</span> · 含量<span class="unit">L</span> / 压力<span class="unit">MPa</span></label>
+        <div class="io"><input id="t2c830" type="text" inputmode="decimal" value="2.3" data-name="2号罐8:30含量" class="lo-conc" style="max-width:46%"><input id="t2p830" type="text" inputmode="decimal" value="0.92" data-name="2号罐8:30压力" style="max-width:46%"></div>
+        <span class="prev-val">昨日 20:30 含量 2.6（供比对）</span>
+      </div>
+      <div class="field">
+        <label><span id="lbl_t1_830">1 号罐（备用）</span> · 含量<span class="unit">L</span> / 压力<span class="unit">MPa</span></label>
+        <div class="io"><input id="t1c830" type="text" inputmode="decimal" value="12.0" data-name="1号罐8:30含量" class="lo-conc" style="max-width:46%"><input id="t1p830" type="text" inputmode="decimal" value="1.05" data-name="1号罐8:30压力" style="max-width:46%"></div>
+      </div>
+    </div>
+  </div>
+  <div class="donebar"><button class="btn ghost" onclick="goHome()">完成 · 返回首页</button></div>
+</section>
+
+<section class="scr" id="scr-s5">
+  <div class="sechead"><button class="back" onclick="goHome()">‹ 首页</button><div><div class="st">液氧读数 · 晚 20:30</div><div class="ss">液氧站 · 到点任务 · 建议顺路核对电梯</div></div></div>
+  <div class="wrap secbody">
+    <div class="card">
+      <div class="field" style="border:none">
+        <label>在用罐<span class="unit">点按切换 · 标题与用量跟随变化</span></label>
+        <div class="seg tank-seg"></div>
+      </div>
+      <div class="field">
+        <label><span id="lbl_t2_2030">2 号罐（在用）</span> · 含量<span class="unit">L</span> / 压力<span class="unit">MPa</span></label>
+        <div class="io"><input id="t2c2030" type="text" inputmode="decimal" value="1.8" data-name="2号罐20:30含量" class="lo-conc" style="max-width:46%"><input id="t2p2030" type="text" inputmode="decimal" value="0.95" data-name="2号罐20:30压力" style="max-width:46%"></div>
+      </div>
+      <div class="field">
+        <label><span id="lbl_t1_2030">1 号罐（备用）</span> · 含量<span class="unit">L</span> / 压力<span class="unit">MPa</span></label>
+        <div class="io"><input id="t1c2030" type="text" inputmode="decimal" value="12.0" data-name="1号罐20:30含量" class="lo-conc" style="max-width:46%"><input id="t1p2030" type="text" inputmode="decimal" value="1.05" data-name="1号罐20:30压力" style="max-width:46%"></div>
+      </div>
+    </div>
+  </div>
+  <div class="donebar"><button class="btn ghost" onclick="goHome()">完成 · 返回首页</button></div>
+</section>
+
+<section class="scr" id="scr-s6">
+  <div class="sechead"><button class="back" onclick="goHome()">‹ 首页</button><div><div class="st">医用气体 · 气瓶 / 压力 / 气源</div><div class="ss">液氧站 · 汇流排间</div></div></div>
+  <div class="wrap secbody">
+    <div class="card">
+      <div class="field">
+        <label>在用罐</label>
+        <div class="seg tank-seg" id="seg_tank" data-name="在用罐"></div>
+      </div>
+      <div class="auto-calc" id="lo_day" style="margin-top:0"></div>
+      <div class="field">
+        <label>液氧站出口压力<span class="unit">MPa</span></label>
+        <div class="io"><input id="lo_out" type="text" inputmode="decimal" value="0.45" data-name="液氧站出口压力"></div>
+      </div>
+      <div class="field">
+        <label>高压氧舱回路出口压力<span class="unit">MPa</span></label>
+        <div class="io"><input id="hbo_out" type="text" inputmode="decimal" value="0.42" data-name="高压氧舱回路出口压力"></div>
+      </div>
+      <div class="field">
+        <label>气瓶满瓶数<span class="unit">瓶 · 括号内为后台基数</span></label>
+        <div class="data-line" style="border:none;padding-bottom:2px"><span class="k" style="font-size:12px">40L氧(40)</span><span class="k" style="font-size:12px">10L氧(20)</span><span class="k" style="font-size:12px">6L氧(20)</span><span class="k" style="font-size:12px">CO₂(20)</span><span class="k" style="font-size:12px">肺功能(1)</span></div>
+        <div class="io" style="gap:6px;flex-wrap:wrap">
+          <input id="b40" type="text" inputmode="numeric" value="40" data-base="40" data-name="40L氧气满瓶" style="max-width:18%;text-align:center;font-size:17px">
+          <input id="b10" type="text" inputmode="numeric" value="22" data-base="20" data-name="10L氧气满瓶" style="max-width:18%;text-align:center;font-size:17px">
+          <input id="b6" type="text" inputmode="numeric" value="21" data-base="20" data-name="6L氧气满瓶" style="max-width:18%;text-align:center;font-size:17px">
+          <input id="bco2" type="text" inputmode="numeric" value="5" data-base="20" data-name="CO₂满瓶" style="max-width:18%;text-align:center;font-size:17px">
+          <input id="bpulm" type="text" inputmode="numeric" value="1" data-base="1" data-name="肺功能气体满瓶" style="max-width:18%;text-align:center;font-size:17px">
+        </div>
+        <div class="rule-note high" id="cyl_rule" hidden></div>
+      </div>
+      <div class="field">
+        <label>瓶氧汇流排进口压力<span class="unit">MPa</span> / 二氧化碳（手术室）出口压力<span class="unit">MPa</span></label>
+        <div class="io"><input id="manifold" type="text" inputmode="decimal" value="0.50" data-name="汇流排进口压力" style="max-width:46%"><input id="co2out" type="text" inputmode="decimal" value="0.40" data-name="CO₂出口压力" style="max-width:46%"></div>
+      </div>
+      <div class="field" data-statusfield>
+        <label>负压气源</label>
+        <div class="seg" id="seg_neg" data-name="负压"></div>
+        <div class="exc-note" hidden><textarea rows="2" placeholder="异常说明（必填）"></textarea></div>
+      </div>
+      <div class="field" data-statusfield>
+        <label>压缩空气</label>
+        <div class="seg" id="seg_air" data-name="压缩空气"></div>
+        <div class="exc-note" hidden><textarea rows="2" placeholder="异常说明（必填）"></textarea></div>
+      </div>
+    </div>
+  </div>
+  <div class="donebar"><button class="btn ghost" onclick="goHome()">完成 · 返回首页</button></div>
+</section>
+
+<section class="scr" id="scr-s7">
+  <div class="sechead"><button class="back" onclick="goHome()">‹ 首页</button><div><div class="st">五 · 供暖 / 冷系统</div><div class="ss">锅炉房 · 制冷机房 · 夏季工况示例</div></div></div>
+  <div class="wrap secbody">
+    <div class="card">
+      <div class="hint" style="margin:0 0 6px">锅炉停机 → 锅炉号/水温自动置灰（一键减负）。</div>
+      <div class="field" data-statusfield>
+        <label>锅炉房是否正常</label>
+        <div class="seg" id="seg_boiler" data-name="锅炉房"></div>
+        <div class="exc-note" hidden><textarea rows="2" placeholder="异常说明（必填）"></textarea></div>
+      </div>
+      <div class="field">
+        <label>锅炉是否运行</label>
+        <div class="seg" id="seg_boilerrun" data-name="锅炉运行" data-opts="运行,停机" data-vals="run,stop"></div>
+      </div>
+      <div id="boiler-detail" class="field dim">
+        <label>使用锅炉号 / 出水温度 / 回水温度<span class="unit">停机时免填</span></label>
+        <div class="io"><input id="boilerno" type="text" value="—" disabled><input id="boilertemp" type="text" value="—" disabled></div>
+      </div>
+      <div class="field" data-statusfield>
+        <label>制冷机房是否正常</label>
+        <div class="seg" id="seg_coolroom" data-name="制冷机房"></div>
+        <div class="exc-note" hidden><textarea rows="2" placeholder="异常说明（必填）"></textarea></div>
+      </div>
+      <div class="field">
+        <label>制冷机组是否运行</label>
+        <div class="seg" id="seg_coolrun" data-name="制冷运行" data-opts="运行,停机" data-vals="run,stop"></div>
+      </div>
+    </div>
+  </div>
+  <div class="donebar"><button class="btn ghost" onclick="goHome()">完成 · 返回首页</button></div>
+</section>
+
+<section class="scr" id="scr-s8">
+  <div class="sechead"><button class="back" onclick="goHome()">‹ 首页</button><div><div class="st">六 · 生活水泵（热 / 冷）</div><div class="ss">泵房 · 水位按楼栋（技术方案 §4.2）</div></div></div>
+  <div class="wrap secbody">
+    <div class="card">
+      <div class="field" id="f_hw1">
+        <label>1 号楼热水 · 设置 / 实际出水温<span class="unit">°C</span></label>
+        <div class="io"><input id="h1set" type="text" inputmode="decimal" value="55" data-name="1号楼设置温度" style="max-width:46%"><input id="h1out" type="text" inputmode="decimal" value="56" data-name="1号楼出水温度" style="max-width:46%"></div>
+      </div>
+      <div class="field" id="f_hw3">
+        <label>3 号楼热水 · 设置 / 实际出水温<span class="unit">°C</span></label>
+        <div class="io"><input id="h3set" type="text" inputmode="decimal" value="55" data-name="3号楼设置温度" style="max-width:46%"><input id="h3out" type="text" inputmode="decimal" value="59" data-name="3号楼出水温度" style="max-width:46%"></div>
+        <div class="rule-note low" id="hw3_rule" hidden></div>
+      </div>
+      <div class="field">
+        <label>1 号楼 / 3 号楼水泵出口水压<span class="unit">MPa</span></label>
+        <div class="io"><input id="p1press" type="text" inputmode="decimal" value="0.35" data-name="1号楼水泵出口水压" style="max-width:46%"><input id="p3press" type="text" inputmode="decimal" value="0.32" data-name="3号楼水泵出口水压" style="max-width:46%"></div>
+      </div>
+      <div class="field" data-statusfield>
+        <label>1 号楼泵房水位</label>
+        <div class="seg" id="seg_p1level" data-name="1号楼水位" data-opts="正常,偏高,偏低"></div>
+        <div class="exc-note" hidden><textarea rows="2" placeholder="异常说明（必填）"></textarea></div>
+      </div>
+      <div class="field" data-statusfield>
+        <label>3 号楼泵房水位</label>
+        <div class="seg" id="seg_p3level" data-name="3号楼水位" data-opts="正常,偏高,偏低"></div>
+        <div class="exc-note" hidden><textarea rows="2" placeholder="异常说明（必填）"></textarea></div>
+      </div>
+    </div>
+  </div>
+  <div class="donebar"><button class="btn ghost" onclick="goHome()">完成 · 返回首页</button></div>
+</section>
+
+<section class="scr" id="scr-s9">
+  <div class="sechead"><button class="back" onclick="goHome()">‹ 首页</button><div><div class="st">七 · 新风 / 空调系统</div><div class="ss">各楼层</div></div></div>
+  <div class="wrap secbody">
+    <div class="card">
+      <div class="field" data-statusfield>
+        <label>性能情况</label>
+        <div class="seg" id="seg_hvac" data-name="新风空调"></div>
+        <div class="exc-note" hidden><textarea rows="2" placeholder="异常说明（必填）"></textarea></div>
+      </div>
+      <div class="field">
+        <label>使用位置（清单后台可配 · 至少一项）</label>
+        <div class="checks" id="locs">
+          <label><input type="checkbox" value="1号楼5-8层" checked>1号楼5-8层</label>
+          <label><input type="checkbox" value="急诊区域" checked>急诊区域</label>
+          <label><input type="checkbox" value="3C病区" checked>3C病区</label>
+          <label><input type="checkbox" value="4C病区" checked>4C病区</label>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="donebar"><button class="btn ghost" onclick="goHome()">完成 · 返回首页</button></div>
+</section>
+
+<section class="scr" id="scr-s10">
+  <div class="sechead"><button class="back" onclick="goHome()">‹ 首页</button><div><div class="st">八 · 节能减排</div><div class="ss">选填</div></div></div>
+  <div class="wrap secbody">
+    <div class="card">
+      <div class="field" style="border:none">
+        <textarea id="save_note" rows="3" data-optional>夜间公共区域照明已切节能模式；1 号楼南向新装光伏板待安排检查。</textarea>
+      </div>
+    </div>
+  </div>
+  <div class="donebar"><button class="btn ghost" onclick="goHome()">完成 · 返回首页</button></div>
+</section>
+
+<section class="scr" id="scr-s11">
+  <div class="sechead"><button class="back" onclick="goHome()">‹ 首页</button><div><div class="st">九 · 电梯一键核对</div><div class="ss">7 台 · 按时间表算预期</div></div></div>
+  <div class="wrap secbody">
+    <div class="card">
+      <div class="hint" style="margin:0 0 6px">系统按<b>核对时刻</b>（现在 <span id="lift-now">--:--</span>）与运行时间表算出"预期状态"；预期状态核对时锁定、提交不重算。</div>
+      <div id="lifts"></div>
+    </div>
+  </div>
+  <div class="donebar"><button class="btn ghost" onclick="goHome()">完成 · 返回首页</button></div>
+</section>
+
+<section class="scr" id="scr-s12">
+  <div class="sechead"><button class="back" onclick="goHome()">‹ 首页</button><div><div class="st">十 · 其它交接事项</div><div class="ss">按条填写 · 接班人逐条确认</div></div></div>
+  <div class="wrap secbody">
+    <div class="card">
+      <div class="field" style="border:none">
+        <textarea id="hand_note" rows="4" data-optional>CO₂ 满瓶仅剩 5 瓶（基数 20），已口头报李科长，换气单待安排——请接班后关注手术室气源。
+2 号液氧罐 20:30 含量 1.8，低于补液线 2.0，请优先安排补液氧。</textarea>
+      </div>
+    </div>
+    <div class="hint">每写一条（换行分隔）就是一条独立确认项——接班人页会逐条要求"已知晓"（技术方案 §5.3）。</div>
+  </div>
+  <div class="donebar"><button class="btn ghost" onclick="goHome()">完成 · 返回首页</button></div>
+</section>
+
+<!-- ═══════════ 提交成功（含撤回窗口） ═══════════ -->
+<section class="scr" id="scr-submitted">
+  <div class="result">
+    <div class="ico">✓</div>
+    <h1>提交成功 · 已同步</h1>
+    <div class="sub" id="sub-version">交接单 HB-20260827-001 · 版本 v1</div>
+    <div class="withdraw-box">
+      <div class="wt">
+        <div>
+          <div style="font-size:13.5px;color:var(--muted);font-weight:600">撤回窗口剩余</div>
+          <div class="count" id="w-count">10:00</div>
+        </div>
+        <button class="know-btn" id="btn-withdraw" style="margin-left:auto" onclick="tryWithdraw()">撤回修改</button>
+      </div>
+      <div class="hint" style="margin:8px 0 0">接班人确认前可撤回；窗口过期或对方已确认后，只能走异议流程（PRD v0.2.2 拍板）。</div>
+    </div>
+    <div class="kv">
+      <div class="r"><span class="k">班次日期</span><span class="v">2026-08-27（周四）</span></div>
+      <div class="r"><span class="k">提交（同步成功）时刻</span><span class="v" id="sub-time"></span></div>
+      <div class="r"><span class="k">异常 / 提醒项</span><span class="v" style="color:var(--danger)" id="sub-abn"></span></div>
+      <div class="r"><span class="k">接班人</span><span class="v" id="sub-receiver">施师傅（排班表自动带出）</span></div>
+    </div>
+    <button class="btn primary" id="btn-as-receiver" onclick="asReceiver()">模拟次日 · 施师傅来交接</button>
+    <div style="height:10px"></div>
+    <button class="btn light" onclick="location.reload()">返回登录重新演示</button>
+  </div>
+</section>
+
+<!-- ═══════════ 异议已退回（给科长看闭环用） ═══════════ -->
+<section class="scr" id="scr-rejected">
+  <div class="result">
+    <div class="ico warn">↩</div>
+    <h1>有异议 · 已退回交班人</h1>
+    <div class="sub">交接单保持"有异议"状态，不影响当班运行</div>
+    <div class="kv" id="rej-kv"></div>
+    <div style="font-size:13.5px;color:var(--muted);text-align:left;background:var(--warn-soft);border-radius:10px;padding:10px 12px;margin-bottom:18px">
+      正式版本：内网部署下张师傅离院无法远程修改，将在<b>下次到岗</b>时处理；超过 24 小时未解决，系统自动升级提醒科长（objection_at 起算）。
+    </div>
+    <button class="btn primary" onclick="backToSubmitter()">模拟张师傅到岗处理</button>
+  </div>
+</section>
+
+<!-- ═══════════ 接班人首页 ═══════════ -->
+<section class="scr" id="scr-rhome">
+  <div class="topbar">
+    <div class="row1">
+      <div>
+        <div class="title">今日待办</div>
+        <div class="who" id="rhome-who">施师傅 · 接班人 · 8 月 28 日（周五）</div>
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
+        <span class="chip ok">● 院内网络</span>
+        <button class="restart" onclick="location.reload()">↻ 重来</button>
+      </div>
+    </div>
+  </div>
+  <div class="wrap">
+    <div class="todo-card" onclick="openConfirm()">
+      <div class="t-ico">1</div>
+      <div><div class="tt">有 1 份交接单待确认</div><div class="ts" id="rhome-ts">张师傅 · 8/27 · 含异常 3 项</div></div>
+      <div class="go" style="margin-left:auto;color:var(--muted);font-size:22px">›</div>
+    </div>
+    <div class="card" style="margin-top:12px">
+      <div class="sec-head"><span class="no">提</span><span class="name">给接班人的话</span></div>
+      <div style="font-size:14.5px;color:var(--muted)">异常项与交接事项已置顶，需逐条点"已知晓"后才能签名；发现数据有误可<b>标注异议退回</b>——对方修改后你再确认，变更内容会列给你看。</div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════ 交接确认详情 ═══════════ -->
+<section class="scr" id="scr-confirm">
+  <div class="topbar">
+    <div class="row1">
+      <div>
+        <div class="title">交接单确认</div>
+        <div class="who" id="conf-who">HB-20260827-001 · 张师傅 → 施师傅</div>
+      </div>
+      <button class="restart" onclick="show('scr-rhome')">返回</button>
+    </div>
+  </div>
+  <div class="wrap">
+    <div class="card" id="r-changes" hidden>
+      <div class="sec-head"><span class="no">变</span><span class="name">本版变更（相对上一版）</span><span class="badge ok" id="r-ver"></span></div>
+      <div id="r-changes-body"></div>
+    </div>
+    <div class="card" id="r-objlog" hidden>
+      <div class="sec-head"><span class="no">议</span><span class="name">异议记录</span></div>
+      <div id="r-objlog-body" style="font-size:14px;color:var(--muted)"></div>
+    </div>
+    <div class="card" id="r-abn">
+      <div class="sec-head"><span class="no">重</span><span class="name">异常与提醒（逐条确认）</span></div>
+    </div>
+    <div class="card">
+      <div class="sec-head"><span class="no">十</span><span class="name">其它交接事项（逐条确认）</span></div>
+      <div id="r-note-list"></div>
+    </div>
+    <div class="card">
+      <div class="sec-head"><span class="no">全</span><span class="name">完整交接数据</span><span class="badge ok">只读</span></div>
+      <div id="r-data"></div>
+    </div>
+    <div class="sig-box">
+      <div class="sh"><b>接班人电子签名</b><button class="clr" onclick="clearSig()">清空重写</button></div>
+      <canvas class="sig" id="sig"></canvas>
+      <div style="font-size:12.5px;color:var(--muted);margin-top:6px">签名即代表：我已逐项浏览本班数据与异常，确认接收本班次责任。</div>
+    </div>
+    <div class="btn-row">
+      <button class="btn danger-o" style="flex:1" onclick="openObjModal()">有异议·退回</button>
+      <button class="btn primary" style="flex:2" id="btn-confirm" onclick="finishConfirm()">确认接收并签名</button>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════ 归档 ═══════════ -->
+<section class="scr" id="scr-archived">
+  <div class="result">
+    <div class="ico">✓</div>
+    <h1>交接完成 · 已归档</h1>
+    <div class="sub">该记录状态"已完成"，科长后台可查</div>
+    <div class="kv" id="arch-kv"></div>
+    <div class="card" style="text-align:left">
+      <div class="sec-head"><span class="no">签</span><span class="name">双方签名</span></div>
+      <div class="data-line"><span class="k">交班人</span><span class="v"><span class="stamp" id="arch-stamp">张师傅（已签名）</span></span></div>
+      <div class="data-line" style="align-items:flex-start"><span class="k">接班人</span><span class="v"><img id="arch-sig" style="height:64px;border:1px solid var(--line);border-radius:8px"></span></div>
+    </div>
+    <button class="btn primary" onclick="location.reload()">重新演示</button>
+  </div>
+</section>
+
+<!-- ═══════════ 弹层 ═══════════ -->
+</div><!-- /.app -->
+<div class="veil" id="veil" onclick="closeSheet()"></div>
+<div class="sheet" id="sheet">
+  <div class="grip"></div>
+  <h2>提交前预览</h2>
+  <div style="font-size:13px;color:var(--muted)">未填项、异常项一目了然（异常不阻塞提交，将标红同步接班人）</div>
+  <div class="sum" id="sheet-sum"></div>
+  <div id="sheet-missing"></div>
+  <div id="sheet-abn"></div>
+  <button class="btn primary" id="btn-real-submit" onclick="submitAll()">确认提交</button>
+  <div style="height:8px"></div>
+  <button class="btn light" onclick="closeSheet()">继续填写</button>
+</div>
+
+<div class="modal" id="modal">
+  <h3 id="modal-title">请确认</h3>
+  <p id="modal-msg"></p>
+  <div class="btn-row">
+    <button class="btn light" style="flex:1" onclick="modalNo()">返回修改</button>
+    <button class="btn primary" style="flex:1" onclick="modalYes()">确认无误</button>
+  </div>
+</div>
+
+<div class="modal" id="modal-obj">
+  <h3>标注异议并退回</h3>
+  <p>请填写异议原因（必填、留痕；退回后交接单状态变为"有异议"）：</p>
+  <textarea id="obj-reason" rows="3" placeholder="例如：20:30 液氧含量与现场表读数不符，请复核后重提"></textarea>
+  <div class="btn-row">
+    <button class="btn light" style="flex:1" onclick="hideObj()">取消</button>
+    <button class="btn danger-o" style="flex:1" onclick="confirmObjection()">确认退回</button>
+  </div>
+</div>
+
+<div class="modal" id="modal-ovr">
+  <h3 id="ovr-title">手工修正自动计算值</h3>
+  <p>PRD F3：允许手工覆盖，但必须填写原因（留痕，且不被系统重算覆盖）。</p>
+  <div class="io" style="margin-bottom:10px"><input id="ovr-val" type="text" inputmode="decimal" placeholder="修正值"></div>
+  <textarea id="ovr-reason" rows="2" placeholder="修正原因（必填，如：换罐导致差值失真）"></textarea>
+  <div class="btn-row">
+    <button class="btn light" style="flex:1" onclick="hideOvr()">取消</button>
+    <button class="btn primary" style="flex:1" onclick="saveOvr()">保存修正</button>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+</div><!-- /.phone -->
+
+<script>
+/* ============ 工具 ============ */
+const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
+function show(id){ $$('.scr').forEach(s=>s.classList.remove('show')); $('#'+id).classList.add('show'); $('#app').scrollTop=0; }
+function toast(msg,ms){ const t=$('#toast'); t.textContent=msg; t.style.display='block'; clearTimeout(t._h); t._h=setTimeout(()=>t.style.display='none',ms||2600); }
+function num(id){ const v=parseFloat($('#'+id).value); return isNaN(v)?null:v; }
+let modalYesFn=null, modalCancelFn=null;
+function askModal(title,msg,onYes,onCancel){
+  $('#modal-title').textContent=title; $('#modal-msg').textContent=msg;
+  modalYesFn=onYes; modalCancelFn=onCancel; $('#modal').classList.add('show');
+}
+function modalYes(){ $('#modal').classList.remove('show'); modalYesFn&&modalYesFn(); }
+function modalNo(){ $('#modal').classList.remove('show'); modalCancelFn&&modalCancelFn(); }
+
+const REQ_SEL='.secbody input:not([disabled]):not([type=checkbox]):not([data-optional])';
+const BASES={ b40:['40L 氧气',40], b10:['10L 氧气',20], b6:['6L 氧气',20], bco2:['二氧化碳',20], bpulm:['肺功能气体',1] };
+const LO_LINE=2.0;
+const SW_LINE=2.5; // 换罐线：在用罐低于此值提示切换（后台可配）
+const OVR={};
+const S={ snapshot:null, version:1, lastVals:null, knows:new Set(), noteKnow:new Set(), strokes:0,
+          withdrawn:false, objectionPending:false, objLog:[], deadline:0, timer:null,
+          user:'张师傅', swap:false, guard:false };
+const SCHED='张师傅'; // 08-27 排班（期望身份来源）
+function receiverName(){ return S.swap?'张师傅':'施师傅'; }
+function applyTankLabels(){
+  const inUse=$('#seg_tank')?$('#seg_tank')._val:'2';
+  [['lbl_t2_830','2'],['lbl_t1_830','1'],['lbl_t2_2030','2'],['lbl_t1_2030','1']].forEach(([id,n])=>{
+    const el=document.getElementById(id); if(el) el.textContent=n+' 号罐'+(n===inUse?'（在用）':'（备用）');
+  });
+}
+
+/* ============ 分段控件 ============ */
+function buildSeg(id){
+  const el=$('#'+id); const opts=(el.dataset.opts||'正常,异常').split(','); const vals=(el.dataset.vals||'ok,bad').split(',');
+  el.innerHTML=opts.map((o,i)=>`<button type="button" data-v="${vals[i]}">${o}</button>`).join('');
+  el._val=vals[0]; el._txt={}; opts.forEach((o,i)=>el._txt[vals[i]]=o);
+  el.querySelector('button').classList.add('on');
+  el.addEventListener('click',e=>{
+    const b=e.target.closest('button'); if(!b)return;
+    el._val=b.dataset.v; [...el.children].forEach(c=>c.className='');
+    b.classList.add('on'); if(b.dataset.v==='bad') b.classList.add('bad');
+    const f=el.closest('[data-statusfield]');
+    if(f){ const note=f.querySelector('.exc-note'); const isBad=b.dataset.v==='bad';
+      note.hidden=!isBad; if(isBad) note.querySelector('textarea').focus(); }
+    calc();
+  });
+}
+const segTxt=id=>{ const el=$('#'+id); return el._txt[el._val]!==undefined?el._txt[el._val]:el._val; };
+
+/* ============ 页面 ============ */
+function login(who){
+  if(who==='shi' && !$('#swap-demo').checked){
+    if(!S.snapshot){ toast('请先以张师傅完成一次提交，再体验接班人确认流程'); return; }
+    show('scr-rhome'); applyReceiverNames(); return;
+  }
+  S.swap=(who==='shi' && $('#swap-demo').checked);
+  S.user=who==='shi'?'施师傅':'张师傅';
+  S.guard=false;
+  if(S.objectionPending){ goHome(); showBanner('bad','该交接单被'+receiverName()+'退回：'+S.pendingReason+'——请修改后重新提交（将生成版本 v'+(S.version+1)+'）'); }
+  else goHome();
+}
+function applyReceiverNames(){
+  $('#rhome-who').textContent=receiverName()+' · 接班人 · 8 月 28 日（周五）';
+  $('#conf-who').textContent='HB-20260827-001 · '+S.user+' → '+receiverName();
+}
+function updateHomeWho(){
+  $('#home-who').innerHTML=S.user+' · 24 小时班 · <span class="ver-tag">v'+S.version+'</span> · 接班 '+receiverName();
+}
+function asReceiver(){ show('scr-rhome'); applyReceiverNames(); }
+function openSec(id){ show(id); }
+function goHome(){ show('scr-home'); refreshHome(); updateHomeWho(); }
+function showBanner(cls,txt){ const b=$('#form-banner'); b.className='banner '+cls; b.hidden=false; b.textContent=txt; }
+
+/* ============ 计算 + 手工修正 ============ */
+function autoEl(id){ return $('#'+id); }
+function renderAuto(key,label,unit,autoHtml,autoVal){
+  const el=autoEl(key);
+  if(OVR[key]){ const o=OVR[key];
+    el.className='auto-calc manual';
+    el.innerHTML=`${label} <b>${o.v}</b> ${unit} <small>（手工修正 · 原因：${o.reason}）</small><button class="ovr" onclick="clearOvr('${key}')">还原</button>`;
+  } else {
+    el.className='auto-calc';
+    el.innerHTML=autoHtml+`<button class="ovr" onclick="openOvr('${key}','${label}','${unit}',${autoVal==null?'null':autoVal})">✎ 修正</button>`;
+  }
+}
+let ovrKey=null;
+function openOvr(key,label,unit,cur){
+  ovrKey=key; $('#ovr-title').textContent='手工修正 · '+label;
+  $('#ovr-val').value=cur==null?'':cur; $('#ovr-reason').value=''; $('#modal-ovr').classList.add('show');
+}
+function hideOvr(){ $('#modal-ovr').classList.remove('show'); }
+function saveOvr(){
+  const v=$('#ovr-val').value.trim(), r=$('#ovr-reason').value.trim();
+  if(!v||isNaN(parseFloat(v))){ toast('请填写修正值'); return; }
+  if(r.length<4){ toast('修正原因必填（不少于 4 个字，正式版本写入 audit_logs.reason）'); return; }
+  OVR[ovrKey]={v,r}; hideOvr(); calc(); toast('已手工修正并留痕（不被重算覆盖）');
+}
+function clearOvr(key){ delete OVR[key]; calc(); }
+
+function calc(){
+  const w=num('w_read'), wp=48939;
+  renderAuto('w_use','每日用水量','吨',
+    w==null?'每日用水量 —':(w<wp?'<span style="color:var(--danger)">读数小于上一班，请核对！</span>':`每日用水量 <b>${(w-wp).toLocaleString()}</b> 吨 <small>（自动 = 本次 − 上一班 ${wp.toLocaleString()}）</small>`),
+    (w!=null&&w>=wp)?(w-wp):null);
+  const e1=num('e1'),e2=num('e2');
+  const eOK=e1!=null&&e2!=null&&e1>=21000&&e2>=16300;
+  renderAuto('e_use','每日用电量','度',
+    (e1==null||e2==null)?'每日用电量 —':(e1<21000||e2<16300?'<span style="color:var(--danger)">读数小于上一班，请核对！</span>':
+    `每日用电量 <b>${((e1-21000)+(e2-16300)).toLocaleString()}</b> 度 <small>（自动 = 如意线 +${e1-21000} + 工贸线 +${e2-16300}，两线之和）</small>`),
+    eOK?(e1-21000)+(e2-16300):null);
+  const g1=num('g1'),g2=num('g2');
+  if(g1!=null&&g2!=null){
+    const u1=3200-g1,u2=2850-g2;
+    let msg;
+    if(u1<0&&u2<0) msg=`<span style="color:var(--danger)">两卡剩余量均增大——请分别确认充气；确认后两卡均按 0 计（防呆）</span>`;
+    else if(u1<0) msg=`<span style="color:var(--danger)">主卡剩余量增大→按主卡充气处理：主卡 0 计 · 留痕；副卡正常 +${u2}</span>　合计用量 <b>${Math.max(u1,0)+Math.max(u2,0)}</b> 立方米 <small>（单卡判定·技术方案 §4.3）</small>`;
+    else if(u2<0) msg=`<span style="color:var(--danger)">副卡剩余量增大→按副卡充气处理：副卡 0 计 · 留痕；主卡正常 +${u1}</span>　合计用量 <b>${Math.max(u1,0)+Math.max(u2,0)}</b> 立方米 <small>（单卡判定·技术方案 §4.3）</small>`;
+    else msg=`每日天然气用量 <b>${u1+u2}</b> 立方米 <small>（自动 = 主卡 ${u1} + 副卡 ${u2}，剩余量递减）</small>`;
+    renderAuto('g_use','每日天然气用量','立方米',msg,(u1>=0&&u2>=0)?u1+u2:null);
+  } else autoEl('g_use').innerHTML='每日天然气用量 —';
+  const inUse=$('#seg_tank')._val;
+  const ua=num('t'+inUse+'c830'),ub=num('t'+inUse+'c2030');
+  const loOK=ua!=null&&ub!=null;
+  renderAuto('lo_day','液氧日间用量','L',
+    loOK?`液氧日间用量 <b>${(ua-ub).toFixed(1)}</b> L <small>（自动 = 在用 ${inUse} 号罐 8:30 ${ua} − 20:30 ${ub}；换罐/补液可修正）</small>`
+        :'液氧日间用量 —（换罐/补液时可手工修正并留痕）',
+    loOK?(ua-ub):null);
+  applyTankLabels();
+  /* 补液线 */
+  $$('.lo-conc').forEach(inp=>{
+    const v=parseFloat(inp.value); const f=inp.closest('.field');
+    f.classList.remove('flagged','flagged-warn');
+    let note=f.querySelector('.rule-note'); if(note) note.remove();
+    if(!isNaN(v)&&v<LO_LINE){
+      f.classList.add('flagged');
+      const d=document.createElement('div'); d.className='rule-note high';
+      d.innerHTML=`⚠ 低于补液线 ${LO_LINE}<span class="why">命中规则：含量 &lt; ${LO_LINE}（单位待核实）→ 高预警：请安排补液氧</span>`;
+      f.appendChild(d);
+    } else if(!isNaN(v)&&v<SW_LINE&&inp.id.startsWith('t'+inUse)){
+      f.classList.add('flagged-warn');
+      const d=document.createElement('div'); d.className='rule-note low';
+      d.innerHTML=`⚠ 低于换罐线 ${SW_LINE}<span class="why">命中规则：在用罐含量 &lt; ${SW_LINE} → 中预警：请切换罐</span>`;
+      f.appendChild(d);
+    }
+  });
+  const bad=[]; for(const id in BASES){ const v=num(id); if(v!=null&&v<BASES[id][1]) bad.push(`${BASES[id][0]} ${v} &lt; 基数 ${BASES[id][1]}`); }
+  const cr=$('#cyl_rule');
+  if(bad.length){ cr.hidden=false; cr.innerHTML=`⚠ 气瓶待换<span class="why">命中规则：满瓶数 &lt; 基数 → 高预警：${bad.join('；')}</span>`; }
+  else cr.hidden=true;
+  cr.closest('.field').classList.toggle('flagged',bad.length>0);
+  const hs=num('h3set'),ho=num('h3out'); const r3=$('#hw3_rule'); const f3=$('#f_hw3');
+  f3.classList.remove('flagged-warn'); r3.hidden=true;
+  if(hs!=null&&ho!=null&&Math.abs(ho-hs)>3){
+    f3.classList.add('flagged-warn'); r3.hidden=false;
+    r3.innerHTML=`⚠ 水温偏离<span class="why">命中规则：偏离设定 ±3°C → 低预警：偏离 ${Math.abs(ho-hs)}°C</span>`;
+  }
+  $$('input[data-prev]').forEach(inp=>{
+    const v=parseFloat(inp.value); const p=parseFloat(inp.dataset.prev);
+    if(inp.dataset.dir==='down') inp.classList.toggle('missing',!isNaN(v)&&v>p);
+    else inp.classList.toggle('missing',!isNaN(v)&&v<p);
+  });
+  const p=progress();
+  const pct=p.need?Math.round(p.done/p.need*100):0;
+  $('#pbar').style.width=pct+'%';
+  $('#ptxt').textContent=`已填写 ${p.done} / ${p.need} 必填项`+(pct===100?' ✓ 可以提交':'');
+}
+function progress(){
+  const inputs=$$(REQ_SEL); let need=inputs.length,done=0;
+  inputs.forEach(i=>{ if(i.value.trim()!==''&&!i.classList.contains('missing'))done++; });
+  need+=$$('.secbody .seg').length; done+=$$('.secbody .seg').length;
+  return {need,done};
+}
+function refreshHome(){
+  $$('.homecard').forEach(c=>{
+    const t=document.getElementById(c.dataset.target); if(!t)return;
+    const inputs=[...t.querySelectorAll(REQ_SEL)];
+    const empty=inputs.filter(i=>i.value.trim()===''||i.classList.contains('missing')).length;
+    const bad=t.querySelectorAll('.field.flagged,.field.flagged-warn').length+t.querySelectorAll('.seg button.bad.on').length;
+    const b=c.querySelector('.hc-badge');
+    if(bad>0){ b.className='hc-badge bad'; b.textContent=`异常 ${bad}`; }
+    else if(empty>0){ b.className='hc-badge todo'; b.textContent=`待填 ${empty}`; }
+    else { b.className='hc-badge done'; b.textContent='已填'; }
+  });
+}
+
+/* ============ 异常汇总 ============ */
+function collectAbn(){
+  const list=[];
+  $$('.lo-conc').forEach(inp=>{
+    const v=parseFloat(inp.value);
+    if(!isNaN(v)&&v<LO_LINE){
+      const which=inp.id.startsWith('t2')?'2 号（在用）液氧罐':'1 号液氧罐';
+      const tp=inp.id.includes('830')?'8:30':'20:30';
+      list.push({lv:'high',t:`${which} ${tp} 含量 ${v}，低于补液线 ${LO_LINE}`,w:'命中规则：含量 < 2.0（单位 L 待核实）→ 请安排补液氧'});
+    }
+  });
+  for(const id in BASES){ const v=num(id);
+    if(v!=null&&v<BASES[id][1]) list.push({lv:'high',t:`${BASES[id][0]}满瓶 ${v} 瓶，低于基数 ${BASES[id][1]}`,w:'命中规则：满瓶数 < 基数 → 请安排换气'});
+  }
+  const inUseA=$('#seg_tank')._val;
+  [['t'+inUseA+'c830','8:30'],['t'+inUseA+'c2030','20:30']].forEach(([id,tp])=>{
+    const v=num(id);
+    if(v!=null&&v<SW_LINE&&v>=LO_LINE) list.push({lv:'mid',t:`${inUseA} 号（在用）罐 ${tp} 含量 ${v}，低于换罐线 ${SW_LINE}`,w:'命中规则：在用罐含量 < 2.5 → 请切换罐（阈值后台可配）'});
+  });
+  const hs=num('h3set'),ho=num('h3out');
+  if(hs!=null&&ho!=null&&Math.abs(ho-hs)>3) list.push({lv:'mid',t:`3 号楼热水出水 ${ho}°C，偏离设定 ${hs}°C 达 ${Math.abs(ho-hs)}°C`,w:'命中规则：水温偏离设定 ±3°C → 低预警'});
+  [['seg_hp','高配房'],['seg_boiler','锅炉房'],['seg_coolroom','制冷机房'],['seg_neg','负压气源'],['seg_air','压缩空气'],['seg_hvac','新风/空调']].forEach(([id,nm])=>{
+    if($('#'+id)._val==='bad') list.push({lv:'high',t:`${nm}状态：异常`,w:'命中规则：状态项异常 → 高预警（需附说明）'});
+  });
+  return list;
+}
+
+/* ============ 电梯 ============ */
+const LIFTS=[
+  {n:'1 号客梯',win:null},{n:'2 号客梯',win:null},{n:'扶梯（门诊-住院连廊）',win:[360,1320]},
+  {n:'5 号医梯',win:null},{n:'8 号货梯',win:null},{n:'人防电梯',win:[390,1080]},{n:'发热门诊电梯',win:null},
+];
+function liftExpected(win){
+  if(!win) return 'run';
+  const d=new Date(),m=d.getHours()*60+d.getMinutes(),[a,b]=win;
+  return (a<=b?(m>=a&&m<b):(m>=a||m<b))?'run':'stop';
+}
+function fmtM(m){ return String(Math.floor(m/60)).padStart(2,'0')+':'+String(m%60).padStart(2,'0'); }
+function buildLifts(){
+  const d=new Date(); $('#lift-now').textContent=fmtM(d.getHours()*60+d.getMinutes());
+  $('#lifts').innerHTML=LIFTS.map((l,i)=>{
+    const exp=liftExpected(l.win);
+    return `<div class="lift-row" data-i="${i}">
+      <div class="lname">${l.n}<div style="font-size:11.5px;color:var(--muted);font-weight:400">${l.win?`时间表 ${fmtM(l.win[0])}–${fmtM(l.win[1])}`:'24 小时运行'}</div></div>
+      <span class="exp ${exp}">预期：${exp==='run'?'运行':'停运'}</span>
+      <div class="seg lift-seg"><button type="button" class="on" data-v="ok">一致</button><button type="button" data-v="diff">不符</button></div>
+    </div>`;
+  }).join('');
+  $$('.lift-seg').forEach(seg=>{
+    seg._val='ok';
+    seg.addEventListener('click',e=>{
+      const b=e.target.closest('button'); if(!b)return;
+      const row=seg.closest('.lift-row'); const i=+row.dataset.i;
+      seg._val=b.dataset.v; [...seg.children].forEach(c=>c.className=''); b.classList.add('on'); if(b.dataset.v==='diff')b.classList.add('bad');
+      let box=row.parentElement.querySelector('.lift-diff[data-i="'+i+'"]');
+      if(b.dataset.v==='diff'&&!box){
+        box=document.createElement('div'); box.className='lift-diff field'; box.dataset.i=i;
+        box.innerHTML=`<label style="font-size:13.5px">实际状态与说明（必填）</label>
+          <div class="io" style="flex-direction:column;gap:6px;align-items:stretch">
+          <select class="lift-actual"><option>实际：仍在运行（预期停运）</option><option>实际：已停运（预期运行）</option><option>实际：故障停梯</option></select>
+          <textarea rows="2" class="lift-why" placeholder="例如：夜班有转运需求，联系总务确认后延时运行"></textarea></div>`;
+        row.after(box);
+      } else if(b.dataset.v!=='diff'&&box) box.remove();
+      calc();
+    });
+  });
+}
+
+/* ============ 采集 / diff ============ */
+const SEG_NAMES={seg_hp:'高配房',seg_tank:'在用罐',seg_boiler:'锅炉房',seg_boilerrun:'锅炉运行',seg_coolroom:'制冷机房',seg_coolrun:'制冷运行',seg_neg:'负压气源',seg_air:'压缩空气',seg_hvac:'新风空调',seg_p1level:'1号楼水位',seg_p3level:'3号楼水位'};
+function collectVals(){
+  const o={};
+  $$('.secbody input:not([disabled]):not([type=checkbox])').forEach(i=>{ if(i.dataset.name) o[i.dataset.name]=i.value.trim(); });
+  Object.keys(SEG_NAMES).forEach(id=>{ o[SEG_NAMES[id]]=segTxt(id); });
+  o['交接事项']=$('#hand_note').value.trim();
+  return o;
+}
+function diffVals(prev,next){
+  const out=[];
+  for(const k in next){ if(!(k in prev))continue; if(String(prev[k])!==String(next[k])) out.push([k,prev[k]||'—',next[k]||'—']); }
+  return out;
+}
+
+/* ============ 提交 ============ */
+function openPreview(){
+  const exc=$$('.exc-note:not([hidden]) textarea').filter(t=>t.value.trim().length<4);
+  if(exc.length){ toast('状态类异常必须填写异常说明'); jumpTo(exc[0]); return; }
+  const liftGaps=$$('.lift-diff .lift-why').filter(t=>t.value.trim().length<4);
+  if(liftGaps.length){ toast('存在"与预期不符"的电梯，请填写原因'); jumpTo(liftGaps[0]); return; }
+  if(!$$('#locs input:checked').length){ toast('新风使用位置至少勾选一项'); jumpTo($('#locs')); return; }
+  const empties=$$(REQ_SEL).filter(i=>i.value.trim()==='');
+  const red=$$('input.missing').filter(i=>!empties.includes(i));
+  const abn=collectAbn(), p=progress();
+  const sumHtml=`
+    <div class="cell"><div class="n" style="color:var(--primary)">${p.done}/${p.need}</div><div class="t">必填项</div></div>
+    <div class="cell"><div class="n" style="color:var(--danger)">${abn.length}</div><div class="t">异常/提醒</div></div>
+    <div class="cell"><div class="n" style="color:var(--warn)">${$('#hand_note').value.trim().split(/\n+/).filter(Boolean).length}</div><div class="t">交接事项条数</div></div>`;
+  const abnHtml=abn.map(a=>`<div class="abn ${a.lv==='mid'?'mid':''}"><b>${a.lv==='high'?'【高】':'【低】'} ${a.t}</b><span>${a.w}</span></div>`).join('')||'<div class="hint">本班无异常项。</div>';
+  const items=[...empties,...red];
+  if(items.length){
+    empties.forEach(i=>i.classList.add('missing'));
+    $('#sheet-missing').innerHTML=`<div class="abn" style="border-left-color:var(--danger)"><b>还有 ${items.length} 项没填好或待核对（点条目直接跳过去）</b></div>`+
+      items.map(i=>`<button class="homecard" style="margin-bottom:8px" onclick="jumpFromSheet('${i.id}')">
+        <div class="hc-no">!</div>
+        <div><div class="hc-t">${fieldLabel(i)}</div><div class="hc-s">${secTitle(i)}</div></div>
+        <span class="hc-badge ${i.classList.contains('missing')&&i.value.trim()!==''?'bad':'todo'}">${i.value.trim()===''?'空白未填':'与上一班不符'}</span>
+      </button>`).join('');
+    $('#sheet-sum').innerHTML=sumHtml;
+    $('#sheet-abn').innerHTML='';
+    const b=$('#btn-real-submit'); b.disabled=true; b.textContent=`还有 ${items.length} 项未填好，暂不可提交`;
+  } else {
+    $('#sheet-missing').innerHTML='';
+    $('#sheet-sum').innerHTML=sumHtml;
+    $('#sheet-abn').innerHTML=abnHtml;
+    const b=$('#btn-real-submit'); b.disabled=false; b.textContent='确认提交';
+  }
+  $('#veil').classList.add('show'); $('#sheet').classList.add('show');
+}
+function fieldLabel(el){
+  if(el.dataset&&el.dataset.name) return el.dataset.name;
+  const f=el.closest('.field'); const lb=f&&f.querySelector('label');
+  return lb? lb.childNodes[0].textContent.trim() : el.id;
+}
+function secTitle(el){ const s=el.closest('.scr'); const st=s&&s.querySelector('.sechead .st'); return st?st.textContent:''; }
+function jumpFromSheet(id){
+  closeSheet();
+  const el=document.getElementById(id); if(!el)return;
+  jumpTo(el);
+  setTimeout(()=>{ el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash'); el.focus&&el.focus(); },150);
+}
+function closeSheet(){ $('#veil').classList.remove('show'); $('#sheet').classList.remove('show'); }
+function jumpTo(el){ const scr=el.closest('.scr'); if(scr)show(scr.id); setTimeout(()=>{ el.scrollIntoView({block:'center'}); el.focus&&el.focus(); },60); }
+
+function submitAll(){
+  closeSheet();
+  if(S.user!==SCHED && !S.guard){
+    askModal('排班对账确认',`今日排班为 ${SCHED}，您以 ${S.user} 身份提交。请确认实际当班（模拟未登记调班场景）；确认后放行并写审计留痕。`,
+      ()=>{ S.guard=true; submitAll(); }, null);
+    return;
+  }
+  const now=new Date();
+  const timeStr=now.toLocaleString('zh-CN',{hour12:false,month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'});
+  const abn=collectAbn();
+  const vals=collectVals();
+  let changes=[];
+  if(S.lastVals){ changes=diffVals(S.lastVals,vals); }
+  S.version=S.lastVals?S.version+1:1;
+  S.lastVals=vals;
+  S.snapshot={
+    version:S.version, time:timeStr, abn, changes,
+    submitter:S.user, receiver:receiverName(), guard:S.guard,
+    note:$('#hand_note').value.trim(),
+    objLog:S.objLog.slice(),
+    rows:[
+      ['每日用水量', OVR.w_use?OVR.w_use.v+' 吨（手工修正）':(num('w_read')-48939)+' 吨'],
+      ['每日用电量', OVR.e_use?OVR.e_use.v+' 度（手工修正）':(num('e1')-21000+num('e2')-16300)+' 度（如意+工贸）'],
+      ['每日天然气', OVR.g_use?OVR.g_use.v+' 立方米（手工修正）':(Math.max(3200-num('g1'),0)+Math.max(2850-num('g2'),0))+' 立方米（单卡防呆）'],
+      ['液氧日间用量', OVR.lo_day?OVR.lo_day.v+' L（手工修正）':(num('t'+$('#seg_tank')._val+'c830')-num('t'+$('#seg_tank')._val+'c2030')).toFixed(1)+` L（在用 ${$('#seg_tank')._val} 号罐）`],
+      ['液氧站出口 / 高氧舱回路',num('lo_out')+' / '+num('hbo_out')+' MPa'],
+      ['气瓶（40L/10L/6L/CO₂/肺功能）',[num('b40'),num('b10'),num('b6'),num('bco2'),num('bpulm')].join(' / ')+' 瓶'],
+      ['汇流排 / CO₂ 出口',num('manifold')+' / '+num('co2out')+' MPa'],
+      ['状态项（高配/锅炉房/制冷/负压/空气/新风）',['seg_hp','seg_boiler','seg_coolroom','seg_neg','seg_air','seg_hvac'].map(i=>$('#'+i)._val==='bad'?'异常':'正常').join(' / ')],
+      ['1 号楼热水（设/实）',num('h1set')+' / '+num('h1out')+' °C'],
+      ['3 号楼热水（设/实）',num('h3set')+' / '+num('h3out')+' °C'],
+      ['水泵（1/3 号楼水压·水位）',num('p1press')+' / '+num('p3press')+' MPa · '+segTxt('seg_p1level')+'/'+segTxt('seg_p3level')],
+      ['新风使用位置',$$('#locs input:checked').map(c=>c.value).join('、')],
+      ['节能减排',$('#save_note').value.trim()||'无'],
+      ['电梯 7 台',$$('.lift-seg').every(s=>s._val==='ok')?'全部与预期一致':'存在不符项'],
+    ],
+    sig:null
+  };
+  $('#sub-time').textContent=timeStr;
+  $('#sub-abn').textContent=abn.length?abn.length+' 项（已标红随单发出）':'0 项';
+  $('#sub-version').innerHTML=`交接单 HB-20260827-001 · <span class="ver-tag">版本 v${S.version}</span>`+(changes.length?` · 本版变更 ${changes.length} 处`:'');
+  $('#rhome-ts').textContent=`${S.user} · 8/27 · 版本 v${S.version} · 含异常 ${abn.length} 项`;
+  updateHomeWho();
+  $('#sub-receiver').textContent=S.swap? receiverName()+'（私下换班 · 排班表未更新）' : receiverName()+'（排班表自动带出）';
+  $('#btn-as-receiver').textContent='模拟次日 · '+receiverName()+'来交接';
+  $('#form-banner').hidden=true;
+  S.withdrawn=false; S.objectionPending=false;
+  show('scr-submitted'); startWithdraw();
+}
+
+/* ============ 撤回窗口 ============ */
+function startWithdraw(){
+  clearInterval(S.timer);
+  S.deadline=Date.now()+10*60*1000;
+  const btn=$('#btn-withdraw'); btn.classList.remove('done'); btn.textContent='撤回修改'; btn.disabled=false; btn.style.opacity='';
+  tickWithdraw(); S.timer=setInterval(tickWithdraw,1000);
+}
+function tickWithdraw(){
+  const left=S.deadline-Date.now(), el=$('#w-count'), btn=$('#btn-withdraw');
+  if(!$('#scr-submitted').classList.contains('show')) return;
+  if(left<=0){ el.textContent='窗口已过期'; el.style.color='var(--danger)'; btn.disabled=true; btn.textContent='已过期 · 只能走异议'; btn.style.opacity=.4; clearInterval(S.timer); return; }
+  const m=Math.floor(left/60000), s=Math.floor(left%60000/1000);
+  el.textContent=m+':'+String(s).padStart(2,'0'); el.style.color='';
+}
+function tryWithdraw(){
+  if(Date.now()>S.deadline){ toast('撤回窗口已过，请联系接班人走异议流程'); return; }
+  askModal('确认撤回？','撤回后交接单回到可编辑状态，'+receiverName()+'端的待确认入口同步消失；修改重新提交后版本+1，撤回动作留痕。',
+    ()=>{ clearInterval(S.timer); S.withdrawn=true; goHome();
+      showBanner('warn','已撤回（原 v'+S.version+' 保留为历史版本）——修改后重新点击提交，将生成版本 v'+(S.version+1));
+      toast('已撤回 · 接班人端入口已消失（audit 留痕）'); },
+    null);
+}
+
+/* ============ 异议闭环 ============ */
+function openObjModal(){ $('#modal-obj').classList.add('show'); $('#obj-reason').value=''; }
+function hideObj(){ $('#modal-obj').classList.remove('show'); }
+function confirmObjection(){
+  const r=$('#obj-reason').value.trim();
+  if(r.length<4){ toast('异议原因必填（不少于 4 个字）'); return; }
+  hideObj();
+  const now=new Date();
+  const t=now.toLocaleString('zh-CN',{hour12:false,month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'});
+  S.objLog.push({by:receiverName(),at:t,reason:r});
+  S.objectionPending=true; S.pendingReason=r;
+  $('#rej-kv').innerHTML=`
+    <div class="r"><span class="k">异议发起人</span><span class="v">${receiverName()}（接班人）</span></div>
+    <div class="r"><span class="k">发起时刻</span><span class="v">${t}（objection_at）</span></div>
+    <div class="r"><span class="k">异议原因</span><span class="v" style="max-width:60%">${r}</span></div>
+    <div class="r"><span class="k">当前版本</span><span class="v">v${S.snapshot.version}</span></div>`;
+  show('scr-rejected');
+}
+function backToSubmitter(){
+  goHome();
+  showBanner('bad','该交接单被施师傅退回：'+S.pendingReason+'——请修改后重新提交（将生成版本 v'+(S.version+1)+'）');
+}
+
+/* ============ 接班人确认 ============ */
+function openConfirm(){
+  const snap=S.snapshot;
+  S.knows=new Set(); S.noteKnow=new Set();
+  const box=$('#r-abn'); box.querySelectorAll('.abn-item').forEach(n=>n.remove());
+  snap.abn.forEach((a,i)=>{
+    const d=document.createElement('div'); d.className='abn '+(a.lv==='mid'?'mid':'')+' abn-item'; d.style.marginTop='10px';
+    d.innerHTML=`<div class="body"><b>${a.lv==='high'?'【高】':'【低】'} ${a.t}</b><span>${a.w}</span></div>
+      <button class="know-btn" data-k="${i}">已知晓</button>`;
+    d.querySelector('.know-btn').addEventListener('click',e=>{
+      const b=e.currentTarget, idx=+b.dataset.k;
+      if(S.knows.has(idx))S.knows.delete(idx); else S.knows.add(idx);
+      b.classList.toggle('done'); b.textContent=S.knows.has(idx)?'已确认知晓':'已知晓';
+      checkConfirmable();
+    });
+    box.appendChild(d);
+  });
+  const notes=(snap.note||'').split(/\n+/).filter(Boolean);
+  S.noteCount=notes.length;
+  $('#r-note-list').innerHTML = notes.length ? notes.map((n,i)=>
+    `<div class="abn mid abn-item" style="margin-top:8px"><div class="body"><b>事项 ${i+1}</b><span>${n}</span></div><button class="know-btn" data-n="${i}">已知晓</button></div>`
+  ).join('') : '<div class="hint">无交接事项。</div>';
+  $$('#r-note-list .know-btn').forEach(b=>b.addEventListener('click',()=>{
+    const idx=+b.dataset.n;
+    if(S.noteKnow.has(idx))S.noteKnow.delete(idx); else S.noteKnow.add(idx);
+    b.classList.toggle('done'); b.textContent=S.noteKnow.has(idx)?'已确认知晓':'已知晓';
+    checkConfirmable();
+  }));
+  const hasChg=snap.version>1&&snap.changes&&snap.changes.length;
+  $('#r-changes').hidden=!hasChg;
+  if(hasChg){
+    $('#r-ver').textContent='v'+snap.version;
+    $('#r-changes-body').innerHTML=snap.changes.map(([k,f,t])=>
+      `<div class="data-line"><span class="k">${k}</span><span class="v">${f} → <b style="color:var(--primary-ink)">${t}</b></span></div>`).join('');
+  }
+  $('#r-objlog').hidden=!snap.objLog.length;
+  if(snap.objLog.length) $('#r-objlog-body').innerHTML=snap.objLog.map(o=>`<div style="margin-bottom:6px">${o.at} · ${o.by}：${o.reason}</div>`).join('');
+  $('#r-data').innerHTML=snap.rows.map(([k,v])=>`<div class="data-line"><span class="k">${k}</span><span class="v">${v}</span></div>`).join('')
+    +`<div class="hint" style="margin-top:8px">手工修正过的字段带"手工修正"标注（audit_logs 可查原因）。</div>`;
+  show('scr-confirm'); initSig(); checkConfirmable();
+}
+function checkConfirmable(){
+  const snap=S.snapshot;
+  const ok=S.knows.size===snap.abn.length && S.noteKnow.size===(S.noteCount||0) && S.strokes>0;
+  $('#btn-confirm').disabled=!ok; return ok;
+}
+function finishConfirm(){
+  if(!checkConfirmable()){ toast('请逐条"已知晓"（异常+交接事项）并完成签名'); return; }
+  clearInterval(S.timer);
+  const snap=S.snapshot; S.snapshot.sig=$('#sig').toDataURL();
+  const now=new Date();
+  const t=now.toLocaleString('zh-CN',{hour12:false,month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'});
+  $('#arch-kv').innerHTML=`
+    <div class="r"><span class="k">交接单号</span><span class="v">HB-20260827-001</span></div>
+    <div class="r"><span class="k">版本</span><span class="v"><span class="ver-tag">v${snap.version}</span>${snap.objLog.length?` · 历经 ${snap.objLog.length} 次异议退回`:''}</span></div>
+    <div class="r"><span class="k">班次日期</span><span class="v">2026-08-27（以班次起始日计）</span></div>
+    <div class="r"><span class="k">交班人 / 提交</span><span class="v">${snap.submitter} · ${snap.time}</span></div>
+    <div class="r"><span class="k">接班人 / 确认</span><span class="v">${snap.receiver} · ${t}</span></div>
+    ${snap.guard?`<div class="r"><span class="k">身份对账</span><span class="v" style="color:var(--warn)">登录 ${snap.submitter} ≠ 排班 ${SCHED}，已确认并留痕（audit_logs）</span></div>`:''}
+    <div class="r"><span class="k">确认项处置</span><span class="v">${snap.abn.length} 异常 + ${S.noteCount||0} 事项 · 全部逐条知晓</span></div>
+    <div class="r"><span class="k">状态</span><span class="v" style="color:var(--ok)">已完成 · 可追溯</span></div>`;
+  $('#arch-sig').src=S.snapshot.sig;
+  $('#arch-stamp').textContent=snap.submitter+'（已签名）';
+  show('scr-archived');
+}
+
+/* ============ 签名板 ============ */
+function initSig(){
+  const c=$('#sig'), ctx=c.getContext('2d');
+  const dpr=window.devicePixelRatio||1;
+  c.width=c.clientWidth*dpr; c.height=c.clientHeight*dpr; ctx.scale(dpr,dpr);
+  ctx.lineWidth=3; ctx.lineCap='round'; ctx.strokeStyle='#1F2A37';
+  let drawing=false,last=null; S.strokes=0;
+  const pos=e=>{const r=c.getBoundingClientRect();return[e.clientX-r.left,e.clientY-r.top];};
+  c.onpointerdown=e=>{drawing=true;last=pos(e);c.setPointerCapture(e.pointerId);};
+  c.onpointermove=e=>{if(!drawing)return;const p=pos(e);ctx.beginPath();ctx.moveTo(last[0],last[1]);ctx.lineTo(p[0],p[1]);ctx.stroke();last=p;S.strokes++;checkConfirmable();};
+  c.onpointerup=()=>{drawing=false;};
+  c._clear=()=>{ctx.clearRect(0,0,c.width,c.height);S.strokes=0;};
+}
+function clearSig(){ $('#sig')._clear(); checkConfirmable(); }
+
+/* ============ 读数防呆 ============ */
+function bindPrevCheck(){
+  $$('input[data-prev]').forEach(inp=>{
+    inp.addEventListener('change',()=>{
+      const v=parseFloat(inp.value), p=parseFloat(inp.dataset.prev);
+      if(isNaN(v)||isNaN(p))return;
+      const down=inp.dataset.dir==='down';
+      const bad=down? v>p : v<p;
+      if(bad){
+        askModal('读数防呆确认',
+          down? `「${inp.dataset.name}」比上一班剩余量更大（${v} > ${p}）。是否发生充气/购卡？确认后该卡当日用量按 0 计并留痕，另一卡正常计算。`
+              : `「${inp.dataset.name}」本次读数小于上一班（${v} < ${p}）。确认抄表无误？`,
+          ()=>{ inp.classList.remove('missing'); toast('已记录确认（正式版本写 audit_logs.reason）'); calc(); },
+          ()=>{ inp.value=p; calc(); });
+      }
+    });
+  });
+}
+
+/* ============ 初始化 ============ */
+['seg_hp','seg_boiler','seg_coolroom','seg_neg','seg_air','seg_hvac','seg_p1level','seg_p3level'].forEach(buildSeg);
+function setTank(v){
+  $('#seg_tank')._val=v;
+  $$('.tank-seg').forEach(el=>{ el._val=v; [...el.children].forEach(c=>{ c.className=''; if(c.dataset.v===v)c.classList.add('on'); }); });
+}
+(function initTankSegs(){
+  $$('.tank-seg').forEach(el=>{
+    el.innerHTML=['1','2'].map(v=>`<button type="button" data-v="${v}">${v} 号罐</button>`).join('');
+    el.addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b)return; setTank(b.dataset.v); calc(); });
+  });
+  setTank('2');
+})();
+buildSeg('seg_boilerrun'); $('#seg_boilerrun')._val='stop'; [...$('#seg_boilerrun').children].forEach((b,i)=>{b.className=i===1?'on bad':'';});
+buildSeg('seg_coolrun'); $('#seg_coolrun')._val='run';
+function syncBoilerGray(){
+  const stop=$('#seg_boilerrun')._val==='stop';
+  $('#boiler-detail').classList.toggle('dim',stop);
+  $('#boilerno').disabled=stop; $('#boilertemp').disabled=stop;
+}
+$('#seg_boilerrun').addEventListener('click',()=>setTimeout(()=>{syncBoilerGray();calc();},0));
+buildLifts(); bindPrevCheck();
+$$('#locs input').forEach(c=>c.addEventListener('change',()=>{c.closest('label').classList.toggle('on',c.checked);calc();}));
+$$('#locs input:checked').forEach(c=>c.closest('label').classList.add('on'));
+$$('.secbody input,.secbody textarea').forEach(i=>i.addEventListener('input',()=>{i.classList.remove('missing');calc();}));
+calc();
+</script>
+</body>
+</html>

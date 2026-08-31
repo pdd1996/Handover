@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Handover · 科长管理后台 Demo v0.1（PC Web）</title>
+<style>
+:root{
+  --bg:#F2F4F7; --card:#FFFFFF; --ink:#1F2A37; --muted:#6B7280; --line:#E2E6EB;
+  --primary:#0E7C66; --primary-ink:#0B5F4F; --primary-soft:#E3F2EE;
+  --danger:#C4372E; --danger-soft:#FBEAE8;
+  --warn:#B7791F; --warn-soft:#FBF1DE;
+  --ok:#15803D; --ok-soft:#E7F4EA;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--ink);font-size:14.5px;line-height:1.55}
+.admin{display:flex;min-height:100vh}
+/* ---------- 侧栏 ---------- */
+.side{width:216px;background:#0F3D33;color:#DDEBE6;padding:18px 0;position:sticky;top:0;height:100vh;display:flex;flex-direction:column}
+.side .logo{display:flex;align-items:center;gap:10px;padding:0 18px 16px;border-bottom:1px solid rgba(255,255,255,.12)}
+.side .logo .sq{width:38px;height:38px;border-radius:10px;background:var(--primary);color:#fff;font-weight:800;display:flex;align-items:center;justify-content:center;font-size:17px}
+.side .logo b{font-size:16px;color:#fff}
+.side .logo small{display:block;font-size:11px;opacity:.7}
+.nav{padding:14px 10px;flex:1}
+.nav button{display:flex;align-items:center;gap:10px;width:100%;background:none;border:none;color:#BCD6CE;font-size:15px;font-weight:600;padding:11px 14px;border-radius:10px;cursor:pointer;text-align:left;margin-bottom:4px}
+.nav button:hover{background:rgba(255,255,255,.08);color:#fff}
+.nav button.on{background:var(--primary);color:#fff}
+.nav .dot{width:8px;height:8px;border-radius:50%;background:currentColor;opacity:.55}
+.side .who{padding:14px 18px;border-top:1px solid rgba(255,255,255,.12);font-size:13px}
+.side .who b{color:#fff}
+/* ---------- 主区 ---------- */
+main{flex:1;min-width:0;padding:20px 26px 60px}
+.top{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+.top h1{font-size:21px}
+.top .sub{color:var(--muted);font-size:13px}
+.demo-bar{background:var(--warn-soft);color:var(--warn);border-radius:10px;padding:8px 14px;font-size:13px;margin:10px 0 18px}
+.restart{background:#fff;border:1.5px solid var(--line);border-radius:99px;padding:6px 14px;font-size:13px;cursor:pointer;color:var(--muted)}
+.pg{display:none}
+.pg.show{display:block}
+/* ---------- 卡片/表格 ---------- */
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:16px}
+.card h2{font-size:16.5px;margin-bottom:4px}
+.card .cs{color:var(--muted);font-size:12.5px;margin-bottom:14px}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th{ text-align:left;color:var(--muted);font-weight:600;font-size:12.5px;padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:10px;border-bottom:1px solid var(--line);vertical-align:top}
+tr:last-child td{border-bottom:none}
+tbody tr.click{cursor:pointer}
+tbody tr.click:hover{background:#F7FAF9}
+.tag{display:inline-block;border-radius:99px;padding:2px 10px;font-size:12px;font-weight:700;white-space:nowrap}
+.tag.ok{background:var(--ok-soft);color:var(--ok)}
+.tag.warn{background:var(--warn-soft);color:var(--warn)}
+.tag.bad{background:var(--danger-soft);color:var(--danger)}
+.tag.gray{background:#EEF1F4;color:var(--muted)}
+.tag.pri{background:var(--primary-soft);color:var(--primary-ink)}
+.btn{border:none;border-radius:10px;padding:9px 16px;font-size:14px;font-weight:700;cursor:pointer}
+.btn.primary{background:var(--primary);color:#fff}
+.btn.light{background:#fff;color:var(--ink);border:1.5px solid var(--line)}
+.btn.danger-o{background:#fff;color:var(--danger);border:1.5px solid var(--danger)}
+.btn.sm{padding:5px 12px;font-size:12.5px;border-radius:8px}
+.btn:disabled{opacity:.45}
+input[type=text],input[type=number],select,textarea{border:1.5px solid var(--line);border-radius:10px;padding:8px 10px;font-size:14.5px;color:var(--ink);background:#fff}
+input:focus,select:focus,textarea:focus{outline:2px solid var(--primary-soft);border-color:var(--primary)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media (max-width:1100px){.grid2{grid-template-columns:1fr}}
+.kvline{display:flex;justify-content:space-between;gap:14px;padding:7px 0;border-bottom:1px dashed var(--line);font-size:13.5px}
+.kvline:last-child{border-bottom:none}
+.kvline .k{color:var(--muted);white-space:nowrap}
+.kvline .v{font-weight:600;text-align:right}
+/* ---------- 详情抽屉 ---------- */
+.veil{position:fixed;inset:0;background:rgba(17,24,39,.4);display:none;z-index:40}
+.veil.show{display:block}
+.drawer{position:fixed;top:0;right:0;bottom:0;width:560px;max-width:96vw;background:var(--bg);z-index:41;transform:translateX(100%);transition:transform .25s;overflow-y:auto;padding:20px}
+.drawer.show{transform:translateX(0)}
+.drawer h2{font-size:18px;margin-bottom:2px}
+.drawer .ds{color:var(--muted);font-size:12.5px;margin-bottom:14px}
+.dsec{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:12px}
+.dsec h3{font-size:14.5px;margin-bottom:8px;display:flex;align-items:center;gap:8px}
+.timeline{border-left:3px solid var(--primary-soft);margin-left:6px;padding-left:16px}
+.timeline .t-item{position:relative;padding-bottom:12px}
+.timeline .t-item::before{content:"";position:absolute;left:-22px;top:5px;width:10px;height:10px;border-radius:50%;background:var(--primary)}
+.timeline .t-item.bad::before{background:var(--danger)}
+.timeline .t-item.warn::before{background:var(--warn)}
+.timeline .tt{font-size:12.5px;color:var(--muted)}
+.timeline .tb{font-size:13.5px;font-weight:600}
+/* ---------- 弹窗/toast ---------- */
+.modal{position:fixed;left:50%;top:34%;transform:translateX(-50%);width:440px;max-width:92vw;background:#fff;border-radius:16px;padding:20px;z-index:45;display:none}
+.modal.show{display:block}
+.modal h3{font-size:16.5px;margin-bottom:8px}
+.modal p{color:var(--muted);font-size:13.5px;margin-bottom:12px}
+.modal .row{display:flex;gap:10px;margin-top:12px}
+.toast{position:fixed;left:50%;bottom:40px;transform:translateX(-50%);background:rgba(17,24,39,.92);color:#fff;font-size:14px;padding:10px 18px;border-radius:99px;z-index:60;display:none;max-width:80%;text-align:center}
+.lift-prev{background:#F7FAF9;border:1px dashed #BFD8CF;border-radius:10px;padding:10px 12px;margin-top:10px;font-size:13px;color:var(--primary-ink)}
+</style>
+</head>
+<body>
+<div class="admin">
+<aside class="side">
+  <div class="logo"><div class="sq">交</div><div><b>新院区交接班</b><small>科长管理后台 · 演示 v0.1</small></div></div>
+  <div class="nav">
+    <button class="on" onclick="go('records',this)"><span class="dot"></span>记录管理</button>
+    <button onclick="go('people',this)"><span class="dot"></span>人员与排班</button>
+    <button onclick="go('config',this)"><span class="dot"></span>配置中心</button>
+    <button onclick="go('audit',this)"><span class="dot"></span>审计日志</button>
+  </div>
+  <div class="who">登录：<b>李科长</b>（管理员）<br>角色权限：全部 + 配置</div>
+</aside>
+
+<main>
+  <div class="top">
+    <div><h1 id="pg-title">记录管理</h1><div class="sub" id="pg-sub">查看 / 追溯全部交接记录（含版本与异议历史）</div></div>
+    <button class="restart" onclick="location.reload()">↻ 重置演示</button>
+  </div>
+  <div class="demo-bar">演示版 · 数据仅存内存 · 对应 PRD v0.2.4 §6.6（F6 精简版：含排班安全阀与漏交检测）与技术方案 v0.2 表结构 · 所有修改都会实时写入"审计日志"</div>
+
+  <!-- ============ 记录管理 ============ -->
+  <section class="pg show" id="pg-records">
+    <div class="card" style="border-color:var(--warn)">
+      <h2 style="color:var(--warn)">应提交未提交（missing_submit）</h2>
+      <div class="cs">定时任务按排班表扫描：班次日期已过约定时点（默认次日 9:00）仍无已提交记录即提醒（PRD v0.2.4 / 技术方案 §5.3）。</div>
+      <div id="missing-body"></div>
+    </div>
+    <div class="card">
+      <h2>交接记录</h2>
+      <div class="cs">点击任意一行查看完整交接单：数据、异常知晓情况、电梯核对、版本与异议时间线、双方签名。</div>
+      <table>
+        <thead><tr><th>班次日期</th><th>交接单号</th><th>交班 → 接班</th><th>异常</th><th>状态</th><th>版本</th></tr></thead>
+        <tbody id="rec-tbody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============ 人员与排班 ============ -->
+  <section class="pg" id="pg-people">
+    <div class="grid2">
+      <div class="card">
+        <h2>师傅账号（实名一人一号）</h2>
+        <div class="cs">开通/停用即时生效并写审计；登录设备记录在审计日志（防共用账号）。</div>
+        <table>
+          <thead><tr><th>账号</th><th>姓名</th><th>状态</th><th>操作</th></tr></thead>
+          <tbody id="user-tbody"></tbody>
+        </table>
+      </div>
+      <div class="card">
+        <h2>轮值排班表</h2>
+        <div class="cs">接班人由排班自动带出；改班即写审计。试试把 8/29 改成施师傅。</div>
+        <table>
+          <thead><tr><th>值班日期</th><th>值班师傅</th><th>操作</th></tr></thead>
+          <tbody id="sch-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 配置中心 ============ -->
+  <section class="pg" id="pg-config">
+    <div class="grid2">
+      <div class="card">
+        <h2>预警阈值 / 基数</h2>
+        <div class="cs">修改保存后下一班填写即时生效，并写审计（旧值→新值）。液氧单位待现场核实，确认后在此全局替换。</div>
+        <div id="cfg-list"></div>
+      </div>
+      <div class="card">
+        <h2>清单配置</h2>
+        <div class="cs">新风使用位置、锅炉清单（后台可配，师傅端勾选/置灰联动）。</div>
+        <div id="list-cfg"></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>电梯字典与运行时间表</h2>
+      <div class="cs">配置一次、每天核对。新增/调整即时反映到师傅端交接单的核对清单；"预期状态"按当前时刻实时预览。</div>
+      <table>
+        <thead><tr><th>名称</th><th>运行计划</th><th>时段</th><th>此刻预期</th><th>状态</th><th>操作</th></tr></thead>
+        <tbody id="lift-tbody"></tbody>
+      </table>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:14px;align-items:center">
+        <input type="text" id="new-lift-name" placeholder="新电梯名称（如 9 号客梯）" style="width:180px">
+        <select id="new-lift-plan"><option value="always">24 小时运行</option><option value="scheduled">按时段运行</option><option value="stopped">长期停运</option></select>
+        <input type="text" id="new-lift-win" placeholder="时段 如 06:00-22:00" style="width:150px">
+        <input type="text" id="new-lift-reason" placeholder="停运原因（长期停运必填）" style="width:200px">
+        <button class="btn primary" onclick="addLift()">新增电梯</button>
+      </div>
+      <div class="lift-prev" id="lift-prev"></div>
+    </div>
+  </section>
+
+  <!-- ============ 审计日志 ============ -->
+  <section class="pg" id="pg-audit">
+    <div class="card">
+      <h2>审计日志（只增不改不删）</h2>
+      <div class="cs">配置修改、排班调整、账号启停、数据覆盖、防呆确认全在此。你在本演示里的每次修改也会实时出现在这里。</div>
+      <table>
+        <thead><tr><th>时刻</th><th>操作人</th><th>动作</th><th>对象</th><th>旧值 → 新值</th><th>原因</th></tr></thead>
+        <tbody id="audit-tbody"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+</div>
+
+<!-- 详情抽屉 -->
+<div class="veil" id="veil" onclick="closeDrawer()"></div>
+<div class="drawer" id="drawer"></div>
+
+<!-- 弹窗 -->
+<div class="modal" id="modal">
+  <h3 id="m-title"></h3>
+  <p id="m-msg"></p>
+  <div id="m-extra"></div>
+  <div class="row">
+    <button class="btn light" style="flex:1" onclick="hideModal()">取消</button>
+    <button class="btn primary" style="flex:1" id="m-ok">确认</button>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $=s=>document.querySelector(s);
+const $$=s=>[...document.querySelectorAll(s)];
+function toast(m){const t=$('#toast');t.textContent=m;t.style.display='block';clearTimeout(t._h);t._h=setTimeout(()=>t.style.display='none',2800);}
+function now(){return new Date().toLocaleString('zh-CN',{hour12:false,month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});}
+
+/* ================= 数据（内存） ================= */
+const DB={
+  users:[
+    {u:'zhang01',n:'张师傅',st:'active'},{u:'shi02',n:'施师傅',st:'active'},
+    {u:'wang03',n:'王师傅',st:'disabled'},{u:'li99',n:'李科长',st:'active',chief:true},
+  ],
+  sched:[
+    {d:'08-27',u:'张师傅'},{d:'08-28',u:'施师傅'},{d:'08-29',u:'王师傅'},{d:'08-30',u:'张师傅'},
+  ],
+  cfg:[
+    {k:'lo_threshold',label:'液氧补液线',v:'2.0',unit:'（数值已确认·单位待核实）'},
+    {k:'lo_switch',label:'液氧换罐线',v:'2.5',unit:'（在用罐低于此值提示切换）'},
+    {k:'lo_drop_12h',label:'液氧 12h 时段降幅',v:'0.8',unit:''},
+    {k:'cyl_base_co2',label:'二氧化碳基数',v:'20',unit:'瓶'},
+    {k:'cyl_base_40',label:'40L 氧气基数',v:'40',unit:'瓶'},
+    {k:'hw_dev',label:'热水温偏差阈值',v:'±3',unit:'°C'},
+    {k:'lo_press',label:'液氧罐压力区间',v:'0.8–1.3',unit:'MPa（待科长定稿）'},
+  ],
+  lists:{
+    hvac:['1号楼5-8层','急诊区域','3C病区','4C病区'],
+    boiler:['1号燃气锅炉','2号燃气锅炉'],
+  },
+  lifts:[
+    {n:'1 号客梯',plan:'always',win:null,st:'active'},
+    {n:'2 号客梯',plan:'always',win:null,st:'active'},
+    {n:'扶梯（门诊-住院连廊）',plan:'scheduled',win:[360,1320],st:'active'},
+    {n:'5 号医梯',plan:'always',win:null,st:'active'},
+    {n:'8 号货梯',plan:'always',win:null,st:'active'},
+    {n:'人防电梯',plan:'scheduled',win:[390,1080],st:'active'},
+    {n:'发热门诊电梯',plan:'always',win:null,st:'active'},
+  ],
+  records:[
+    {no:'HB-20260828-001',d:'08-28',sub:'施师傅',rec:'张师傅',abn:2,st:'待确认',ver:1},
+    {no:'HB-20260827-001',d:'08-27',sub:'张师傅',rec:'施师傅',abn:3,st:'已完成',ver:2,
+     detail:{
+       water:'49239 → 用量 300 吨（自动）',elec:'如意 +400 / 工贸 +370 = 770 度（自动）',
+       gas:'主卡 40 + 副卡 5 = 45 立方米（自动）',lo:'日间用量 0.5 L（2 号罐 2.3→1.8）',
+       cyl:'40 / 22 / 21 / 5 / 1 瓶',press:'液氧站 0.45 · 高氧舱 0.42 · 汇流排 0.50 · CO₂ 0.40 MPa',
+       status:'高配房/锅炉房/制冷机房/负压/空气/新风：全部正常',pump:'1号楼 55/56°C · 3号楼 55/59°C（偏离 4°C 低预警）',
+       alerts:[
+         {lv:'bad',t:'2 号液氧罐 20:30 含量 1.8 < 补液线 2.0',ack:'施师傅 08-28 08:02 已知晓'},
+         {lv:'bad',t:'二氧化碳满瓶 5 < 基数 20',ack:'施师傅 08-28 08:02 已知晓'},
+         {lv:'warn',t:'3 号楼热水偏离设定 4°C（>±3）',ack:'施师傅 08-28 08:03 已知晓'},
+       ],
+       lifts:'7 台全部与预期一致（核对时刻 20:32，预期状态已锁定）',
+       tl:[
+         {cls:'',tt:'08-28 07:52',tb:'张师傅提交 v1（同步成功）'},
+         {cls:'bad',tt:'08-28 08:10',tb:'施师傅标注异议退回：「20:30 液氧含量与现场表读数不符，请复核」'},
+         {cls:'warn',tt:'08-28 09:05',tb:'张师傅修改重提 v2：2 号罐 20:30 含量 1.6 → 1.8（复核后更正，留痕）'},
+         {cls:'',tt:'08-28 09:20',tb:'施师傅逐条知晓 3 项 + 签名确认 → 已完成'},
+       ],
+       note:'① CO₂ 满瓶仅剩 5 瓶，换气单待安排，请关注手术室气源。② 2 号液氧罐含量低于补液线，请优先安排补液氧。',
+     }},
+    {no:'HB-20260826-001',d:'08-26',sub:'施师傅',rec:'张师傅',abn:0,st:'已完成',ver:1},
+  ],
+  audit:[
+    {t:'08-28 09:05',who:'张师傅',act:'record.override',obj:'HB-20260827-001 · t2_c2030',ov:'1.6 → 1.8',why:'异议退回后复核现场表更正'},
+    {t:'08-28 08:10',who:'施师傅',act:'record.objection',obj:'HB-20260827-001',ov:'—',why:'20:30 液氧含量与现场表读数不符'},
+    {t:'08-27 16:40',who:'李科长',act:'config.update',obj:'cyl_base_co2',ov:'18 → 20',why:'月度复盘后上调基数'},
+    {t:'08-27 16:38',who:'李科长',act:'schedule.update',obj:'08-29',ov:'施师傅 → 王师傅',why:'施师傅调休'},
+    {t:'08-25 09:12',who:'李科长',act:'user.update',obj:'wang03（王师傅）',ov:'active → disabled',why:'病假一个月，暂停排班'},
+  ],
+};
+function audit(act,obj,ov,why){ DB.audit.unshift({t:now(),who:'李科长',act,obj,ov,why:why||'—'}); renderAudit(); }
+
+/* ================= 页面切换 ================= */
+const TITLES={records:['记录管理','查看 / 追溯全部交接记录（含版本与异议历史）'],
+  people:['人员与排班','账号一人一号实名 · 排班驱动接班人自动带出'],
+  config:['配置中心','阈值/基数/清单/电梯字典——修改即时生效并写审计'],
+  audit:['审计日志','谁在何时把什么从多少改成多少']};
+function go(id,btn){
+  $$('.pg').forEach(p=>p.classList.remove('show')); $('#pg-'+id).classList.add('show');
+  $$('.nav button').forEach(b=>b.classList.remove('on')); btn.classList.add('on');
+  $('#pg-title').textContent=TITLES[id][0]; $('#pg-sub').textContent=TITLES[id][1];
+}
+
+/* ================= 记录 ================= */
+const TODAY='08-30'; // 演示当前日期
+function renderMissing(){
+  const miss=DB.sched.filter(s=>s.d<TODAY && !DB.records.some(r=>r.d===s.d && (r.st==='已完成'||r.st==='待确认')));
+  $('#missing-body').innerHTML = miss.length
+    ? miss.map(s=>`<div class="kvline"><span class="k"><span class="tag bad">漏交</span> 班次 ${s.d} · 排班 ${s.u}</span><span class="v" style="color:var(--warn)">已过约定时点仍无提交记录 → 已生成站内通知</span></div>`).join('')
+    : '<div class="kvline"><span class="k">无</span><span class="v" style="color:var(--ok)">各班次均已提交</span></div>';
+}
+function stTag(s){return s==='已完成'?'<span class="tag ok">已完成</span>':s==='待确认'?'<span class="tag warn">待确认</span>':'<span class="tag bad">'+s+'</span>';}
+function renderRecords(){
+  $('#rec-tbody').innerHTML=DB.records.map((r,i)=>`<tr class="click" onclick="openRec(${i})">
+    <td><b>${r.d}</b></td><td>${r.no}</td><td>${r.sub} → ${r.rec}</td>
+    <td>${r.abn?`<span class="tag bad">${r.abn} 项</span>`:'<span class="tag gray">0</span>'}</td>
+    <td>${stTag(r.st)}</td><td><span class="tag pri">v${r.ver}</span></td></tr>`).join('');
+}
+function openRec(i){
+  const r=DB.records[i];
+  let html=`<h2>${r.no} <span class="tag pri">v${r.ver}</span> ${stTag(r.st)}</h2>
+    <div class="ds">班次 ${r.d} · 交班 ${r.sub} → 接班 ${r.rec} · 以班次起始日计</div>`;
+  if(r.detail){
+    const d=r.detail;
+    html+=`<div class="dsec"><h3>用量与读数</h3>
+      <div class="kvline"><span class="k">水</span><span class="v">${d.water}</span></div>
+      <div class="kvline"><span class="k">电</span><span class="v">${d.elec}</span></div>
+      <div class="kvline"><span class="k">天然气</span><span class="v">${d.gas}</span></div>
+      <div class="kvline"><span class="k">液氧</span><span class="v">${d.lo}</span></div>
+      <div class="kvline"><span class="k">气瓶（40L/10L/6L/CO₂/肺功能）</span><span class="v">${d.cyl}</span></div>
+      <div class="kvline"><span class="k">压力</span><span class="v">${d.press}</span></div>
+      <div class="kvline"><span class="k">状态项</span><span class="v">${d.status}</span></div>
+      <div class="kvline"><span class="k">水泵/水温</span><span class="v">${d.pump}</span></div></div>
+    <div class="dsec"><h3>异常与知晓（alerts 表）</h3>${d.alerts.map(a=>
+      `<div class="kvline"><span class="k" style="white-space:normal"><span class="tag ${a.lv}">${a.lv==='bad'?'高':'低'}</span> ${a.t}</span><span class="v" style="color:var(--ok)">${a.ack}</span></div>`).join('')}</div>
+    <div class="dsec"><h3>电梯核对（elevator_checks）</h3><div class="kvline"><span class="k">7 台</span><span class="v">${d.lifts}</span></div></div>
+    <div class="dsec"><h3>交接事项（逐条确认）</h3><div style="font-size:13.5px">${d.note.split('②').map((s,j)=>`<div style="margin-bottom:4px">${j===0?'①':'②'}${s.trim()} <span class="tag ok">施师傅已确认</span></div>`).join('')}</div></div>
+    <div class="dsec"><h3>版本与异议时间线（record_versions）</h3><div class="timeline">${d.tl.map(x=>
+      `<div class="t-item ${x.cls}"><div class="tt">${x.tt}</div><div class="tb">${x.tb}</div></div>`).join('')}</div></div>
+    <div class="dsec"><h3>签名</h3><div class="kvline"><span class="k">交班人</span><span class="v"><span class="tag pri">张师傅（已签名）</span></span></div>
+      <div class="kvline"><span class="k">接班人</span><span class="v"><span class="tag ok">施师傅 08-28 09:20 签名</span></span></div></div>`;
+  } else {
+    html+=`<div class="dsec"><h3>摘要</h3><div class="kvline"><span class="k">异常</span><span class="v">${r.abn} 项</span></div>
+      <div class="kvline"><span class="k">说明</span><span class="v">演示数据从简；完整字段结构见 08-27 记录</span></div></div>`;
+  }
+  html+=`<button class="btn light" style="width:100%" onclick="closeDrawer()">关闭</button>`;
+  $('#drawer').innerHTML=html; $('#veil').classList.add('show'); $('#drawer').classList.add('show');
+}
+function closeDrawer(){ $('#veil').classList.remove('show'); $('#drawer').classList.remove('show'); }
+
+/* ================= 人员/排班 ================= */
+function renderUsers(){
+  $('#user-tbody').innerHTML=DB.users.filter(u=>!u.chief).map(u=>`<tr>
+    <td>${u.u}</td><td><b>${u.n}</b></td>
+    <td>${u.st==='active'?'<span class="tag ok">启用</span>':'<span class="tag gray">停用</span>'}</td>
+    <td><button class="btn sm ${u.st==='active'?'danger-o':'primary'}" onclick="toggleUser('${u.u}')">${u.st==='active'?'停用':'启用'}</button></td></tr>`).join('');
+}
+function toggleUser(id){
+  const u=DB.users.find(x=>x.u===id); const to=u.st==='active'?'disabled':'active';
+  askModal((to==='disabled'?'停用':'启用')+'账号 '+u.n, to==='disabled'?'停用后该账号无法登录，也不出现在排班候选里；操作写审计。':'启用后恢复登录与排班候选；操作写审计。','',()=>{
+    const old=u.st; u.st=to; renderUsers();
+    audit('user.update',`${u.u}（${u.n}）`,`${old} → ${to}`);
+    toast('账号已'+(to==='disabled'?'停用':'启用')+'，审计已记录');
+  });
+}
+function renderSched(){
+  const active=DB.users.filter(u=>!u.chief&&u.st==='active');
+  $('#sch-tbody').innerHTML=DB.sched.map((s,i)=>{
+    let opts=active.slice();
+    if(!opts.some(u=>u.n===s.u)) opts=opts.concat([{n:s.u,st:'disabled'}]);
+    const curSt=(DB.users.find(u=>u.n===s.u)||{}).st;
+    return `<tr><td><b>${s.d}</b></td><td>${s.u}${curSt==='disabled'?' <span class="tag gray">已停用</span>':''}</td>
+    <td><select onchange="changeSched(${i},this.value)">${opts.map(u=>`<option ${u.n===s.u?'selected':''}>${u.n}${u.st==='disabled'?'（已停用）':''}</option>`).join('')}</select></td></tr>`;
+  }).join('');
+}
+function changeSched(i,v){
+  v=v.replace('（已停用）','');
+  const s=DB.sched[i]; if(s.u===v)return;
+  const old=s.u; s.u=v; renderSched();
+  audit('schedule.update',s.d,`${old} → ${v}`,'科长调整排班');
+  toast(`${s.d} 接班人将自动带出为 ${v}（audit 已记录）`);
+}
+
+/* ================= 配置 ================= */
+function renderCfg(){
+  $('#cfg-list').innerHTML=DB.cfg.map((c,i)=>`<div class="kvline" style="align-items:center">
+    <span class="k">${c.label}<br><small style="color:var(--muted)">${c.k} ${c.unit}</small></span>
+    <span class="v" style="display:flex;gap:6px;align-items:center">
+      <input type="text" id="cfg-${i}" value="${c.v}" style="width:90px;text-align:center">
+      <button class="btn sm primary" onclick="saveCfg(${i})">保存</button></span></div>`).join('');
+  $('#list-cfg').innerHTML=
+    `<div class="kvline"><span class="k">新风使用位置</span><span class="v">${DB.lists.hvac.join('、')}</span></div>
+     <div class="kvline"><span class="k">锅炉清单</span><span class="v">${DB.lists.boiler.join('、')}</span></div>
+     <div style="margin-top:10px;color:var(--muted);font-size:12.5px">清单编辑同阈值：改值→保存→审计（演示从简，未做行内编辑）。</div>`;
+}
+function saveCfg(i){
+  const c=DB.cfg[i]; const nv=$('#cfg-'+i).value.trim();
+  if(!nv||nv===c.v)return;
+  const old=c.v; c.v=nv; renderCfg();
+  audit('config.update',c.k,`${old} → ${nv}`,'科长配置中心修改');
+  toast(`「${c.label}」已改为 ${nv}，下一班填写即时生效（audit 已记录）`);
+}
+
+/* ================= 电梯 ================= */
+function fmtW(w){return w?`${String(Math.floor(w[0]/60)).padStart(2,'0')}:${String(w[0]%60).padStart(2,'0')}–${String(Math.floor(w[1]/60)).padStart(2,'0')}:${String(w[1]%60).padStart(2,'0')}`:'—';}
+function expNow(w){ if(!w)return 'run'; const d=new Date(),m=d.getHours()*60+d.getMinutes(),[a,b]=w; return (a<=b?(m>=a&&m<b):(m>=a||m<b))?'run':'stop'; }
+function planTxt(l){return l.plan==='always'?'24 小时运行':l.plan==='scheduled'?'按时段运行':'长期停运';}
+function renderLifts(){
+  $('#lift-tbody').innerHTML=DB.lifts.map((l,i)=>`<tr>
+    <td><b>${l.n}</b></td><td>${planTxt(l)}</td><td>${fmtW(l.win)}${l.plan==='stopped'&&l.reason?'（'+l.reason+'）':''}</td>
+    <td>${l.st==='active'?(expNow(l.win)==='run'?'<span class="tag ok">运行</span>':'<span class="tag gray">停运</span>'):'—'}</td>
+    <td>${l.st==='active'?'<span class="tag ok">在用</span>':'<span class="tag gray">退役</span>'}</td>
+    <td>${l.st==='active'?`<button class="btn sm danger-o" onclick="retireLift(${i})">退役</button>`:''}</td></tr>`).join('');
+  const d=new Date();
+  $('#lift-prev').innerHTML=`师傅端此刻打开电梯核对将看到（核对时刻 ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')} 锁定预期）：`+
+    DB.lifts.filter(l=>l.st==='active').map(l=>`${l.n} → 预期${expNow(l.win)==='run'?'运行':'停运'}`).join(' · ');
+}
+function addLift(){
+  const n=$('#new-lift-name').value.trim(), plan=$('#new-lift-plan').value,
+        winTxt=$('#new-lift-win').value.trim(), reason=$('#new-lift-reason').value.trim();
+  if(n.length<2){toast('请填写电梯名称');return;}
+  let win=null;
+  if(plan==='scheduled'){
+    const m=winTxt.match(/^(\d{1,2}):(\d{2})\s*[-–]\s*(\d{1,2}):(\d{2})$/);
+    if(!m){toast('时段格式如 06:00-22:00');return;}
+    win=[+m[1]*60+ +m[2], +m[3]*60+ +m[4]];
+  }
+  if(plan==='stopped'&&reason.length<4){toast('长期停运必须填写原因');return;}
+  DB.lifts.push({n,plan,win,st:'active',reason:reason||null});
+  $('#new-lift-name').value='';$('#new-lift-win').value='';$('#new-lift-reason').value='';
+  renderLifts();
+  audit('elevator.create',n,`— → ${planTxt({plan})} ${fmtW(win)}`,'科长新增电梯');
+  toast(`「${n}」已加入字典，师傅端下次打开即出现该核对行`);
+}
+function retireLift(i){
+  const l=DB.lifts[i];
+  askModal('退役电梯「'+l.n+'」？','退役后不再出现在师傅端核对清单，历史记录保留可追溯。','',()=>{
+    l.st='retired'; renderLifts();
+    audit('elevator.retire',l.n,'active → retired');
+    toast('已退役，审计已记录');
+  });
+}
+
+/* ================= 审计 ================= */
+function renderAudit(){
+  $('#audit-tbody').innerHTML=DB.audit.map(a=>`<tr><td style="white-space:nowrap">${a.t}</td><td>${a.who}</td>
+    <td><span class="tag ${a.act.includes('objection')?'bad':a.act.includes('config')||a.act.includes('schedule')||a.act.includes('user')||a.act.includes('elevator')?'pri':'warn'}">${a.act}</span></td>
+    <td>${a.obj}</td><td>${a.ov}</td><td style="color:var(--muted)">${a.why}</td></tr>`).join('');
+}
+
+/* ================= 弹窗 ================= */
+let mFn=null;
+function askModal(t,msg,extra,fn){ $('#m-title').textContent=t; $('#m-msg').textContent=msg; $('#m-extra').innerHTML=extra||''; mFn=fn; $('#modal').classList.add('show'); }
+function hideModal(){ $('#modal').classList.remove('show'); }
+$('#m-ok').addEventListener('click',()=>{ hideModal(); mFn&&mFn(); });
+
+renderRecords(); renderUsers(); renderSched(); renderCfg(); renderLifts(); renderAudit(); renderMissing();
+</script>
+</body>
+</html>
