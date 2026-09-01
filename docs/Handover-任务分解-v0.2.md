@@ -32,7 +32,7 @@
 | 编号 | 任务 | 关联规格 | 完成判据 | 依赖 | 状态 |
 | --- | --- | --- | --- | --- | --- |
 | TK-01 | monorepo 脚手架：pnpm workspace，`apps/api`（NestJS）、`apps/h5`（师傅端）、`apps/admin`（科长后台）、`packages/shared`、`tests/e2e`（Playwright）；TS 严格模式、ESLint/Prettier、CI 空跑 | D-T01、DEP-01 | 一条命令启动全部开发服务；CI 上 lint + 空测试通过 | — | ✅ |
-| TK-02 | 数据库落地：Drizzle schema 按技术方案 §4.2 十二张表逐列建齐，迁移脚本 + 种子加载脚本（数据见《开发种子数据 v0.1》） | DATA-11、技术方案 §4 | 全新 MySQL 实例一键 migrate + seed 成功；schema 与 §4.2 DDL 逐列核对无异 | TK-01 | ⬜ |
+| TK-02 | 数据库落地：Drizzle schema 按技术方案 §4.2 十二张表逐列建齐，迁移脚本 + 种子加载脚本（数据见《开发种子数据 v0.1》） | DATA-11、技术方案 §4 | 全新 MySQL 实例一键 migrate + seed 成功；schema 与 §4.2 DDL 逐列核对无异 | TK-01 | ✅ |
 | TK-03 | 共享类型与错误契约：`packages/shared` 定义板块/字段/状态枚举与**统一错误响应结构**（含 `missing_fields[].anchor`，见 API 契约 §3）；三端同源引用 | C-09、DATA-11 | 三端 import 编译通过；错误结构类型与 API 契约一致 | TK-01 | ⬜ |
 | TK-04 | 认证与账号：登录/登出/当前用户接口，bcrypt 加盐，会话超时，登录事件写审计（设备、IP） | F1-11、C-05 | F1-11-T1/T2/T3 绿 | TK-02 | ⬜ |
 
@@ -117,3 +117,4 @@
 1. **v0.1（2026-09-01）**：初稿。按台账 v1.3 与 DEP-05/06 拆解为 38 个任务（P1 33 个 + P2 骨架 5 个），组织为 M0–M5 六个里程碑；完成判据统一挂钩测试用例清单的 `-T` 编号。
 2. **v0.2（2026-09-01）**：TK-33 交付物正式挂接《双轨比对操作规格 v0.1》与《手工验收与运营检查单 v0.1》（原括号内提示升级为独立文档）；TK-32 判据引用检查单 §三；新增 TK-39（demo v0.4 状态补齐——UI 状态缺口以 demo 迭代落地）；上游台账指针同步至 v1.4。
 3. **v0.2 状态回写（2026-09-01）**：TK-01 完成（⬜→✅）——仓库根建 pnpm workspace 五包（apps/api、apps/h5、apps/admin、packages/shared、tests/e2e），TS 严格模式 + ESLint + Prettier + GitHub Actions CI 工作流；本地验证 `pnpm dev` 一命令三服务启动（api:3000/h5:5173/admin:5174）、lint 与空测试全绿。队列下一个任务：TK-02（数据库落地）。
+4. **v0.2 状态回写（2026-09-02）**：TK-02 完成（⬜→✅）——Drizzle schema 按 §4.2 十二表逐列建齐（records 75 列），drizzle-kit 迁移 + 手工对齐段（ENGINE/COMMENT/ON UPDATE）与 §4.2 DDL 逐列核对无异；db:migrate 自动建库、db:seed 幂等落地种子全量数据（计数自检：5/22/11/17/8/10 均吻合）；配套修订《开发种子数据》电梯占位窗口对齐场景矩阵。队列下一个任务：TK-03（共享类型与错误契约）或 TK-04（认证，依赖本任务）。

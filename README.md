@@ -17,6 +17,8 @@ tests/  e2e（Playwright 用例，随 TK-31 建设）
 
 开发环境一条命令启动（需 Node ≥20 + pnpm）：`pnpm install && pnpm dev`——后端 :3000、师傅端 :5173、科长后台 :5174。
 
+数据库（TK-02 已落地）：把 `apps/api/.env.example` 复制为 `apps/api/.env` 并填本机 MySQL 凭据，然后 `pnpm --filter @handover/api run db:setup` 一键建库 + 迁移 + 种子（幂等，重跑先清后插；种子数据严禁进生产）。
+
 ## 文档地图
 
 先读哪份，取决于你想回答什么问题：
