@@ -231,6 +231,7 @@ CREATE INDEX `idx_user` ON `notifications` (`user_id`,`read_at`);--> statement-b
 CREATE INDEX `idx_status` ON `records` (`status`);--> statement-breakpoint
 -- ── 对齐《技术方案》§4.2（drizzle-kit 不生成的部分，手工补齐，改本文件需同步 schema 语义）──
 ALTER TABLE `users` ENGINE = InnoDB, DEFAULT CHARSET = utf8mb4, COMMENT = '人员账号';--> statement-breakpoint
+ALTER TABLE `users` MODIFY `username` varchar(32) NOT NULL COMMENT '系统发号', MODIFY `real_name` varchar(32) NOT NULL COMMENT '实名';--> statement-breakpoint
 ALTER TABLE `users` MODIFY `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间';--> statement-breakpoint
 ALTER TABLE `schedules` ENGINE = InnoDB, DEFAULT CHARSET = utf8mb4, COMMENT = '排班表';--> statement-breakpoint
 ALTER TABLE `schedules` MODIFY `duty_date` date NOT NULL COMMENT '值班日期';--> statement-breakpoint

@@ -19,6 +19,8 @@ tests/  e2e（Playwright 用例，随 TK-31 建设）
 
 数据库（TK-02 已落地）：把 `apps/api/.env.example` 复制为 `apps/api/.env` 并填本机 MySQL 凭据，然后 `pnpm --filter @handover/api run db:setup` 一键建库 + 迁移 + 种子（幂等，重跑先清后插；种子数据严禁进生产）。
 
+改表结构须知：drizzle-kit 迁移不生成表/列 COMMENT、ENGINE、`ON UPDATE CURRENT_TIMESTAMP`——这些只在 `apps/api/drizzle/0000_*.sql` 末尾的手工对齐段里。改 `schema.ts` 后重新 `db:generate` 时，须在新迁移末尾手工追加受影响列的 MODIFY 对齐（对照《技术方案》§4.2），否则 COMMENT/ON UPDATE 会被静默剥掉。
+
 ## 文档地图
 
 先读哪份，取决于你想回答什么问题：

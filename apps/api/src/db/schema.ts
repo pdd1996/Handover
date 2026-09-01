@@ -34,14 +34,15 @@ export const users = mysqlTable('users', {
     .default(sql`CURRENT_TIMESTAMP`),
   updatedAt: datetime('updated_at', { mode: 'string' })
     .notNull()
-    .default(sql`CURRENT_TIMESTAMP`)
-    .$onUpdateFn(() => new Date()),
+    .default(sql`CURRENT_TIMESTAMP`),
+  // 更新时间由迁移手工段的 ON UPDATE CURRENT_TIMESTAMP 维护（与 §4.2 一致），勿加 $onUpdateFn：
+  // string 模式下钩子须返回 string，且客户端时区与 CURRENT_TIMESTAMP 来源会混写
 });
 
 // 排班（一天一人；接班人自动带出依赖此表）
 export const schedules = mysqlTable('schedules', {
   id: int('id').primaryKey().autoincrement(),
-  dutyDate: date('duty_date').notNull().unique(),
+  dutyDate: date('duty_date', { mode: 'string' }).notNull().unique(), // string 模式：读回 'YYYY-MM-DD' 字符串
   userId: int('user_id')
     .notNull()
     .references(() => users.id),
@@ -55,7 +56,7 @@ export const records = mysqlTable(
   {
     id: int('id').primaryKey().autoincrement(),
     recordNo: varchar('record_no', { length: 20 }).notNull().unique(),
-    dutyDate: date('duty_date').notNull().unique(),
+    dutyDate: date('duty_date', { mode: 'string' }).notNull().unique(),
     submitterId: int('submitter_id')
       .notNull()
       .references(() => users.id),
@@ -144,8 +145,7 @@ export const records = mysqlTable(
       .default(sql`CURRENT_TIMESTAMP`),
     updatedAt: datetime('updated_at', { mode: 'string' })
       .notNull()
-      .default(sql`CURRENT_TIMESTAMP`)
-      .$onUpdateFn(() => new Date()),
+      .default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => [index('idx_status').on(table.status)],
 );

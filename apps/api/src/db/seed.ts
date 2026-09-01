@@ -37,25 +37,30 @@ const recordNo = (offset: number): string => `HB-${d(offset).replaceAll('-', '')
 async function main(): Promise<void> {
   const { db, pool } = createDb();
 
-  // ── 幂等清理（先关外键检查再逐表 TRUNCATE）──────────────
-  await pool.query('SET FOREIGN_KEY_CHECKS=0');
-  for (const t of [
-    'audit_logs',
-    'attachments',
-    'notifications',
-    'alerts',
-    'elevator_checks',
-    'record_versions',
-    'records',
-    'configs',
-    'spots',
-    'elevators',
-    'schedules',
-    'users',
-  ]) {
-    await pool.query(`TRUNCATE TABLE \`${t}\``);
+  // ── 幂等清理（先关外键检查再逐表 TRUNCATE；固定单连接，会话级变量不串连接）──
+  const conn = await pool.getConnection();
+  try {
+    await conn.query('SET FOREIGN_KEY_CHECKS=0');
+    for (const t of [
+      'audit_logs',
+      'attachments',
+      'notifications',
+      'alerts',
+      'elevator_checks',
+      'record_versions',
+      'records',
+      'configs',
+      'spots',
+      'elevators',
+      'schedules',
+      'users',
+    ]) {
+      await conn.query(`TRUNCATE TABLE \`${t}\``);
+    }
+    await conn.query('SET FOREIGN_KEY_CHECKS=1');
+  } finally {
+    conn.release();
   }
-  await pool.query('SET FOREIGN_KEY_CHECKS=1');
 
   // ── 一、人员（密码仅开发环境统一；生产一人一号由科长发号，C-05）──
   const passwordHash = bcrypt.hashSync(DEV_PASSWORD, 10);
@@ -152,7 +157,8 @@ async function main(): Promise<void> {
 
   // ── 五、电梯字典（按《电梯字典初配置》预填；❓ 时段为占位）──
   // 注：定时段电梯窗口占位取 06:00–21:00，使场景矩阵 D-1「21:30 核对、预期停运」成立；正式时段待总务科
-  const windows0600 = JSON.stringify([['06:00', '21:00']]);
+  // windows 直接传数组（drizzle json 列会 JSON.stringify 一次；先 stringify 会双重编码成字符串标量）
+  const windows0600: Array<[string, string]> = [['06:00', '21:00']];
   await db.insert(elevators).values([
     { name: '1号电梯', planType: 'scheduled' as const, windows: windows0600 },
     { name: '2号电梯', planType: 'scheduled' as const, windows: windows0600 },
@@ -210,10 +216,8 @@ async function main(): Promise<void> {
     const receiver = dutyOf(offset + 1);
     const firstDay = k === 0;
     const refillDay = offset === -4; // 充气日
-    const switchDay = offset === -3; // 换罐日（tank_in_use 由 1→2）
     const objectionDay = offset === -2; // 异议单
     const pendingDay = offset === -1; // 待确认单
-    void switchDay;
 
     // 水/电/气读数按模板递变
     const water = (10000 + 250 * k).toFixed(1);
@@ -227,8 +231,8 @@ async function main(): Promise<void> {
         : (400 - 30 * (k - 6)).toFixed(1);
     const g2 = (480 - 30 * k).toFixed(1);
 
-    // 液氧：D-10～D-5 在用罐=1；D-3（换罐日）起在用罐=2；两罐读数全程有效
-    const inUse: 1 | 2 = k <= 5 ? 1 : 2;
+    // 液氧：D-10～D-4 在用罐=1；D-3（换罐日，对齐文档 §六）起在用罐=2；两罐读数全程有效
+    const inUse: 1 | 2 = k <= 6 ? 1 : 2;
     const inUseC830 = (50 - 0.2 * k).toFixed(2);
     const inUseC2030 = (50 - 0.2 * (k + 1)).toFixed(2);
     const p830 = '1.20';
@@ -246,7 +250,7 @@ async function main(): Promise<void> {
             t1P830: p830,
             t1C2030: inUseC2030,
             t1P2030: p2030,
-            ...(k === 5
+            ...(k >= 5
               ? { t2C830: backup2.c830, t2P830: p830, t2C2030: backup2.c2030, t2P2030: p2030 }
               : {}),
           }
@@ -450,8 +454,41 @@ async function main(): Promise<void> {
       ` records=${nRec} record_versions=${nVer} elevator_checks=${nChk} alerts=${nAlt}` +
       ` audit_logs=${nAud} notifications=${nNtf}`,
   );
-  if (nUsers !== 5 || nSch !== 22 || nSpots !== 11 || nCfg !== 17 || nElev !== 8 || nRec !== 10) {
-    console.error('[db:seed] 计数与《开发种子数据》不符，请检查');
+  const expected = {
+    users: nUsers,
+    schedules: nSch,
+    spots: nSpots,
+    configs: nCfg,
+    elevators: nElev,
+    records: nRec,
+    record_versions: nVer,
+    elevator_checks: nChk,
+    alerts: nAlt,
+    audit_logs: nAud,
+    notifications: nNtf,
+  } as const;
+  const docCounts: Record<keyof typeof expected, number> = {
+    users: 5,
+    schedules: 22,
+    spots: 11,
+    configs: 17,
+    elevators: 8,
+    records: 10,
+    record_versions: 2,
+    elevator_checks: 8,
+    alerts: 4,
+    audit_logs: 3,
+    notifications: 1,
+  };
+  const mismatches = (Object.keys(docCounts) as Array<keyof typeof expected>).filter(
+    (key) => expected[key] !== docCounts[key],
+  );
+  if (mismatches.length > 0) {
+    console.error(
+      `[db:seed] 计数与《开发种子数据》不符：${mismatches
+        .map((key) => `${key}=${expected[key]}（应为 ${docCounts[key]}）`)
+        .join(', ')}`,
+    );
     process.exitCode = 1;
   }
   await pool.end();
