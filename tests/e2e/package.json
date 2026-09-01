@@ -1,0 +1,15 @@
+{
+  "name": "@handover/e2e",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "test:e2e": "playwright test",
+    "report": "playwright show-report",
+    "codegen": "playwright codegen http://localhost:5173"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.52.0",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.0"
+  }
+}
