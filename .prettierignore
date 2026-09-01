@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.vite/
+coverage/
+playwright-report/
+test-results/
+*.local
+.env
+.env.*
+pnpm-lock.yaml
+
+# docs/ 与 demo/ 是总务科拍板的定稿文档，不参与机器格式化，避免无意义重排行
+demo/
+docs/
+scripts/

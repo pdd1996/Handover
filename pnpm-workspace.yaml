@@ -1,0 +1,8 @@
+packages:
+  - 'apps/*'
+  - 'packages/*'
+  - 'tests/*'
+
+# pnpm 11 构建脚本白名单（esbuild 为 Vite 依赖；旧版 onlyBuiltDependencies 键已合并至此）
+allowBuilds:
+  esbuild: true

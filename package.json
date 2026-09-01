@@ -1,0 +1,28 @@
+{
+  "name": "handover",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "packageManager": "pnpm@11.25.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @handover/shared run build && pnpm -r --parallel run dev",
+    "build": "pnpm --filter @handover/shared run build && pnpm -r --filter \"!@handover/shared\" run build",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "pnpm -r run test",
+    "check-ledger": "node scripts/check-ledger.mjs"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.30.0",
+    "eslint": "^9.30.0",
+    "eslint-plugin-vue": "^9.32.0",
+    "prettier": "^3.5.0",
+    "typescript": "^5.8.0",
+    "typescript-eslint": "^8.35.0"
+  }
+}
