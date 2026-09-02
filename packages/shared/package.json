@@ -7,7 +7,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsc -p tsconfig.json --watch",
-    "test": "echo \"no tests yet (TK-03)\""
+    "test": "echo \"@handover/shared: 契约一致性由 tsc 编译期 satisfies fixture 保证（TK-03）；C-09 运行期用例见 F1-08（TK-06/TK-12）\""
   },
   "devDependencies": {
     "typescript": "^5.8.0"
