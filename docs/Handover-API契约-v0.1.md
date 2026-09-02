@@ -35,7 +35,7 @@
 ```
 
 - `code`：机器可读错误码（见 §3 错误码表）
-- `missing_fields[]`：**缺失/越界字段逐条点名**——`field` 列名、`section` 板块序、`label` 中文名、`anchor` 前端跳转锚点；无缺失类错误时为 `null`
+- `missing_fields[]`：**缺失/越界字段逐条点名**——`field` 点名对象（records 列名；**电梯核对行为 `elevator:{id}`**，因明细落 `elevator_checks` 逐台一行、records 无对应列，而 ELE-04/ELE-07 同受 C-09「所有拦截逐条点名 + 点击跳转定位」约束）、`section` 板块序（0=基础信息，1~10=业务板块，电梯为 9）、`label` 中文名、`anchor` 前端跳转锚点（生成式 `#sec-{板块号}-{field 的 kebab 形式}`，`_` 与 `:` 均转 `-`）；无缺失类错误时为 `null`
 - `need_confirm`：防呆/安全阀需确认时为确认对象（见 §4 提交协议），否则 `null`
 - `request_id`：日志追踪
 
@@ -56,7 +56,7 @@
 | 409 | WITHDRAW_NOT_ALLOWED | 不可撤回（`reason`: WINDOW_EXPIRED / ALREADY_CONFIRMED / IN_OBJECTION） | F2-10 |
 | 409 | CONFIRM_INCOMPLETE | 仍有未逐条知晓的标红项/交接事项 | F2-04 |
 | 409 | OVERRIDE_REASON_REQUIRED | 覆盖自动计算值未填原因 | F3-06 |
-| 409 | ELEVATOR_EXPLANATION_REQUIRED | 电梯不一致未填说明 | ELE-04、ELE-07 |
+| 409 | ELEVATOR_EXPLANATION_REQUIRED | 电梯不一致未填说明（`missing_fields[].field` 以 `elevator:{id}` 点名，section=9） | ELE-04、ELE-07 |
 | 409 | RECORD_EXISTS | 当日记录已提交（duty_date 唯一） | F1-01 |
 
 ## 3. 路由总表
@@ -171,3 +171,4 @@
 ## 修订记录
 
 1. **v0.1（2026-09-01）**：初稿。定义统一错误结构（C-09 落地：`missing_fields[].field/section/label/anchor`）、错误码表 14 项、Phase 1 路由 32 条（认证 3 / 今日交接与异议 10 / 电梯 2 / 确认 5 / 历史通知 3 / 后台 9，另预警中心与趋势 2 条 ⏸）、提交协议六步与服务端固化口径（DATA-09）、审计联动表。
+2. **v0.1 订正（2026-09-02）**：TK-03（共享类型与错误契约）代码 review 后补明 §2 `missing_fields[]` 的取值口径：① `field` 除 records 列名外，**电梯核对行以 `elevator:{id}` 点名**——明细落 `elevator_checks` 逐台一行、records 无对应列，而 ELE-04-T2（不一致未填说明→拒绝）与 ELE-07-T1（无说明→「拦截并点名」）同受 C-09 约束，须支持点击跳转定位（原稿未明文，实现侧易误认为电梯不走点名结构）；② `section` 明确含 0（基础信息，如 `receiver_change_reason` 条件必填）与 9（电梯）；③ `anchor` 生成式写明为 `#sec-{板块号}-{field 的 kebab 形式}`（`_` 与 `:` 均转 `-`，如 `#sec-2-hp-status`、`#sec-9-elevator-3`）；④ 错误码表 ELEVATOR_EXPLANATION_REQUIRED 行补注点名形态。**另订正条目 1 的笔误：错误码表实为 13 项（原文写「14 项」）；条目 1 按「修订记录只追加不删除」纪律保留原文不改，以本条为准**。代码侧同步落地：`packages/shared/src/errors.ts` 的 `MissingTarget` / `fieldAnchor` / `toElevatorMissingField`、`sections.ts` 的 `ELEVATOR_SECTION_NO`。
