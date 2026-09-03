@@ -11,6 +11,7 @@ export default tseslint.config(
       '**/test-results/**',
       '**/coverage/**',
       'scripts/**', // 仓库维护脚本（check-ledger.mjs），非系统代码，不纳入 lint 范围
+      '.qoder/**', // IDE/工具产物（如 better-harness 报告），已入 .gitignore，不属系统代码
     ],
   },
   js.configs.recommended,

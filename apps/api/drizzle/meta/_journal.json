@@ -8,6 +8,13 @@
       "when": 1788276390760,
       "tag": "0000_deep_malice",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1788330671537,
+      "tag": "0001_strange_northstar",
+      "breakpoints": true
     }
   ]
 }

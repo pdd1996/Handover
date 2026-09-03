@@ -13,3 +13,9 @@ pnpm-lock.yaml
 demo/
 docs/
 scripts/
+
+# IDE/工具产物（已入 .gitignore），不参与格式化
+.qoder/
+
+# drizzle-kit 生成的迁移快照与日志（机器产物，每次 db:generate 重写，格式化无意义且会反复冲突）
+apps/api/drizzle/meta/

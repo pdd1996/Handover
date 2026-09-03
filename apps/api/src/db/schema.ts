@@ -2,6 +2,7 @@ import 'reflect-metadata';
 import { sql } from 'drizzle-orm';
 import {
   bigint,
+  char,
   date,
   datetime,
   decimal,
@@ -17,11 +18,11 @@ import {
 } from 'drizzle-orm/mysql-core';
 
 /**
- * Drizzle schema —�?严格对照《技术方案与数据库设�?v0.2》�?.2 的十二张表逐列建齐（TK-02）�?
- * 口径来源：�?.2 建表语句；列命名与类型（精度/可空/默认�?索引/外键）与�?DDL 一致�?
+ * Drizzle schema —— 严格对照《技术方案与数据库设计 v0.2》§4.2 的十三张表逐列建齐（TK-02；TK-04 增 sessions）。
+ * 口径来源：§4.2 建表语句；列命名与类型（精度/可空/默认值/索引/外键）与 §4.2 DDL 一致。
  */
 
-// 账号（实名一人一号，防共用；登录设备记入 audit_logs�?
+// 账号（实名一人一号，防共用；登录设备记入 audit_logs）
 export const users = mysqlTable('users', {
   id: int('id').primaryKey().autoincrement(),
   username: varchar('username', { length: 32 }).notNull().unique(),
@@ -38,6 +39,32 @@ export const users = mysqlTable('users', {
   // 更新时间由迁移手工段的 ON UPDATE CURRENT_TIMESTAMP 维护（与 §4.2 一致），勿加 $onUpdateFn：
   // string 模式下钩子须返回 string，且客户端时区与 CURRENT_TIMESTAMP 来源会混写
 });
+
+// 会话存根（D-T13：服务端会话落库；Cookie 与 Bearer 双通道共用同一存根）
+export const sessions = mysqlTable(
+  'sessions',
+  {
+    // 存 SHA-256(令牌) 摘要而非明文：拖库也不能冒用在线会话
+    tokenHash: char('token_hash', { length: 64 }).primaryKey(),
+    userId: int('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    ip: varchar('ip', { length: 64 }),
+    userAgent: varchar('user_agent', { length: 200 }),
+    // 凭证下发通道：浏览器 cookie / 小程序等非浏览器客户端 bearer
+    channel: mysqlEnum('channel', ['cookie', 'bearer']).notNull().default('cookie'),
+    createdAt: datetime('created_at', { mode: 'string' })
+      .notNull()
+      .default(sql`CURRENT_TIMESTAMP`),
+    // 最后活跃时刻（滑动超时判定，每次鉴权通过刷新）
+    lastSeenAt: datetime('last_seen_at', { mode: 'string' })
+      .notNull()
+      .default(sql`CURRENT_TIMESTAMP`),
+    // 过期时刻 = last_seen_at + configs.session_timeout_minutes（❓ 默认 720 待科长确认）
+    expiresAt: datetime('expires_at', { mode: 'string' }).notNull(),
+  },
+  (table) => [index('idx_sess_user').on(table.userId), index('idx_sess_exp').on(table.expiresAt)],
+);
 
 // 排班（一天一人；接班人自动带出依赖此表）
 export const schedules = mysqlTable('schedules', {
@@ -81,11 +108,11 @@ export const records = mysqlTable(
     eUse: decimal('e_use', { precision: 12, scale: 1 }),
     hpStatus: mysqlEnum('hp_status', ['ok', 'bad']),
     hpNote: varchar('hp_note', { length: 200 }),
-    // 三、天然气（剩余量递减�?
+    // 三、天然气（剩余量递减）
     g1Remaining: decimal('g1_remaining', { precision: 12, scale: 1 }),
     g2Remaining: decimal('g2_remaining', { precision: 12, scale: 1 }),
     gasUse: decimal('gas_use', { precision: 12, scale: 1 }),
-    // 四、医用气体（液氧两时点同记录；单位待现场核实�?
+    // 四、医用气体（液氧两时点同记录；单位待现场核实）
     tankInUse: tinyint('tank_in_use'),
     t1C830: decimal('t1_c830', { precision: 8, scale: 2 }),
     t1P830: decimal('t1_p830', { precision: 5, scale: 2 }),
@@ -121,7 +148,7 @@ export const records = mysqlTable(
     coolroomStatus: mysqlEnum('coolroom_status', ['ok', 'bad']),
     coolroomNote: varchar('coolroom_note', { length: 200 }),
     coolRun: mysqlEnum('cool_run', ['run', 'stop']),
-    // 六、水�?
+    // 六、水泵
     h1SetTemp: decimal('h1_set_temp', { precision: 5, scale: 1 }),
     h1OutTemp: decimal('h1_out_temp', { precision: 5, scale: 1 }),
     h3SetTemp: decimal('h3_set_temp', { precision: 5, scale: 1 }),
@@ -132,7 +159,7 @@ export const records = mysqlTable(
     p1Height: decimal('p1_height', { precision: 6, scale: 2 }),
     p3Level: mysqlEnum('p3_level', ['ok', 'high', 'low']),
     p3Height: decimal('p3_height', { precision: 6, scale: 2 }),
-    // 七~�?
+    // 七~十
     hvacStatus: mysqlEnum('hvac_status', ['ok', 'bad']),
     hvacNote: varchar('hvac_note', { length: 200 }),
     hvacLocs: json('hvac_locs'),
@@ -170,7 +197,7 @@ export const recordVersions = mysqlTable(
   (table) => [uniqueIndex('uk_rec_ver').on(table.recordId, table.version)],
 );
 
-// 电梯字典（后台配置；时段跨零点用 [�?止] 数组表达�?
+// 电梯字典（后台配置；时段跨零点用 [起,止] 数组表达）
 export const elevators = mysqlTable('elevators', {
   id: int('id').primaryKey().autoincrement(),
   name: varchar('name', { length: 40 }).notNull(),
@@ -211,7 +238,7 @@ export const spots = mysqlTable('spots', {
   updatedAt: datetime('updated_at', { mode: 'string' }),
 });
 
-// 配置中心（阈�?基数/区间/清单；每次修改写 audit_logs�?
+// 配置中心（阈值/基数/区间/清单；每次修改写 audit_logs）
 export const configs = mysqlTable('configs', {
   id: int('id').primaryKey().autoincrement(),
   configKey: varchar('config_key', { length: 64 }).notNull().unique(),
@@ -265,7 +292,7 @@ export const notifications = mysqlTable(
   (table) => [index('idx_user').on(table.userId, table.readAt)],
 );
 
-// 照片附件（文件存磁盘，库内记路径�?
+// 照片附件（文件存磁盘，库内记路径）
 export const attachments = mysqlTable('attachments', {
   id: int('id').primaryKey().autoincrement(),
   recordId: int('record_id')
@@ -281,7 +308,7 @@ export const attachments = mysqlTable('attachments', {
     .default(sql`CURRENT_TIMESTAMP`),
 });
 
-// 审计日志（配置修改、数据覆盖、登录事件全记录�?
+// 审计日志（配置修改、数据覆盖、登录事件全记录）
 export const auditLogs = mysqlTable(
   'audit_logs',
   {

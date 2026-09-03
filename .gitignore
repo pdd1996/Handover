@@ -8,3 +8,6 @@ test-results/
 .env
 .env.*
 !.env.example
+
+# IDE/工具产物（如 better-harness 分析报告），不属系统代码，不入库
+.qoder/

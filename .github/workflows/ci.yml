@@ -7,6 +7,26 @@ on:
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
+    # 接口测试需真实 MySQL 与种子数据（F1-11-T1/T2/T3 断言会话存根落库、审计留痕；
+    # D-T13 的会话存根在 sessions 表，无库则用例无法成立）。凭据与本地开发一致，见 apps/api/.env.example
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+    env:
+      DB_HOST: 127.0.0.1
+      DB_PORT: '3306'
+      DB_USER: root
+      DB_PASSWORD: root
+      DB_NAME: handover
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -20,5 +40,8 @@ jobs:
         run: pnpm build
       - name: Lint
         run: pnpm lint
-      - name: Unit tests
+      # 一键建库 + 灌种子（db:migrate 自动 CREATE DATABASE；db:seed 幂等且自带计数自检）
+      - name: Prepare database
+        run: pnpm --filter @handover/api db:setup
+      - name: Unit and API tests
         run: pnpm test
