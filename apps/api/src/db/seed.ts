@@ -135,6 +135,11 @@ async function main(): Promise<void> {
     { key: 'objection_escalate_hours', value: '24', remark: '异议升级时限' },
     { key: 'withdraw_window_minutes', value: '10', remark: '撤回窗口' },
     {
+      key: 'session_timeout_minutes',
+      value: '720',
+      remark: '❓ 会话滑动超时（分钟）待科长确认；种子值 12 小时对齐 24 小时班制（D-T13）',
+    },
+    {
       key: 'missing_submit_deadline',
       value: '09:00',
       remark: '应提交未提交扫描时点（次日，可调）',
@@ -471,7 +476,7 @@ async function main(): Promise<void> {
     users: 5,
     schedules: 22,
     spots: 11,
-    configs: 17,
+    configs: 18,
     elevators: 8,
     records: 10,
     record_versions: 2,
