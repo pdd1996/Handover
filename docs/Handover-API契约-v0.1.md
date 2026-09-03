@@ -13,7 +13,7 @@
 | 项 | 约定 |
 | --- | --- |
 | 基础路径 | `/api/v1` |
-| 认证 | 账号密码登录建立会话（Cookie）；会话超时自动退出（技术方案 §6） |
+| 认证 | 账号密码登录建立会话；凭证经 **HttpOnly Cookie**（浏览器：师傅端 H5、科长后台）**或 `Authorization: Bearer`**（非浏览器客户端：专有钉钉/企微内网小程序等）传输，两者共用同一会话存根（`sessions` 表）；服务端守卫先查 Header 再回落 Cookie；会话超时自动退出（滑动窗口，时长取 configs `session_timeout_minutes`）——详技术方案 §6「会话机制」、决策记录 D-T13 |
 | 角色 | `master`（师傅：填写与确认）、`chief`（科长：全部 + 配置）；接口按角色守卫 |
 | 时间 | ISO 8601 带时区；**班次一律以 `duty_date`（班次起始日）为准**（C-08） |
 | 分页 | `page` / `page_size`，响应含 `total` |
@@ -65,9 +65,11 @@
 
 | 方法与路径 | 角色 | 用途 | 关联规格 | 契约要点 |
 | --- | --- | --- | --- | --- |
-| POST `/auth/login` | 公开 | 登录 | F1-11 | 成功建会话并写审计（设备、IP）；失败不泄露账号是否存在 |
-| POST `/auth/logout` | 登录用户 | 登出 | F1-11 | 会话失效 |
-| GET `/auth/me` | 登录用户 | 当前用户与角色 | F1-11 | 返回 id/real_name/role |
+| POST `/auth/login` | 公开 | 登录 | F1-11 | body `{username, password, channel?}`，`channel` 取 `cookie`（默认）或 `bearer`。成功建会话（写 `sessions` 存根，记设备与 IP）并写审计；**`cookie` 通道仅 `Set-Cookie`（HttpOnly + SameSite=Lax）、响应体不返回令牌**（防 XSS 从响应体窃取，保住 HttpOnly 的意义）；`bearer` 通道在响应体返回 `token`。失败不泄露账号是否存在（统一「账号或密码错误」，失败也写审计）；已停用账号提示停用而非报错（F1-11-T3） |
+| POST `/auth/logout` | 登录用户 | 登出 | F1-11 | **删除 `sessions` 存根行 → 会话立即失效**（不仅清 Cookie，服务端亦不再认可该令牌）；写审计 |
+| GET `/auth/me` | 登录用户 | 当前用户与角色 | F1-11 | 返回 id/real_name/role；Cookie 与 Bearer 两通道均可鉴权 |
+
+鉴权失败统一返 401 `UNAUTHENTICATED`（未登录/会话过期/已登出/账号被停用）；角色不足返 403 `FORBIDDEN`。账号停用（F6-02）时服务端删除该用户全部 `sessions` 行，已在线设备下一次请求即 401。
 
 ### 3.2 今日交接（师傅端）
 
@@ -172,3 +174,4 @@
 
 1. **v0.1（2026-09-01）**：初稿。定义统一错误结构（C-09 落地：`missing_fields[].field/section/label/anchor`）、错误码表 14 项、Phase 1 路由 32 条（认证 3 / 今日交接与异议 10 / 电梯 2 / 确认 5 / 历史通知 3 / 后台 9，另预警中心与趋势 2 条 ⏸）、提交协议六步与服务端固化口径（DATA-09）、审计联动表。
 2. **v0.1 订正（2026-09-02）**：TK-03（共享类型与错误契约）代码 review 后补明 §2 `missing_fields[]` 的取值口径：① `field` 除 records 列名外，**电梯核对行以 `elevator:{id}` 点名**——明细落 `elevator_checks` 逐台一行、records 无对应列，而 ELE-04-T2（不一致未填说明→拒绝）与 ELE-07-T1（无说明→「拦截并点名」）同受 C-09 约束，须支持点击跳转定位（原稿未明文，实现侧易误认为电梯不走点名结构）；② `section` 明确含 0（基础信息，如 `receiver_change_reason` 条件必填）与 9（电梯）；③ `anchor` 生成式写明为 `#sec-{板块号}-{field 的 kebab 形式}`（`_` 与 `:` 均转 `-`，如 `#sec-2-hp-status`、`#sec-9-elevator-3`）；④ 错误码表 ELEVATOR_EXPLANATION_REQUIRED 行补注点名形态。**另订正条目 1 的笔误：错误码表实为 13 项（原文写「14 项」）；条目 1 按「修订记录只追加不删除」纪律保留原文不改，以本条为准**。代码侧同步落地：`packages/shared/src/errors.ts` 的 `MissingTarget` / `fieldAnchor` / `toElevatorMissingField`、`sections.ts` 的 `ELEVATOR_SECTION_NO`。
+3. **v0.1 修订（2026-09-02）**：TK-04（认证与账号）开工，按决策记录 **D-T13** 更新认证口径——§1「认证」行由「账号密码登录建立会话（Cookie）」扩为**双通道**（浏览器 HttpOnly Cookie / 非浏览器客户端 `Authorization: Bearer`，共用同一 `sessions` 存根；守卫先查 Header 再回落 Cookie；滑动超时取 configs `session_timeout_minutes`）；§3.1 三条路由补契约要点：`login` 请求体增可选 `channel`（默认 `cookie`；**`cookie` 通道响应体不返回令牌**以防 XSS 窃取、`bearer` 通道返回 `token`）、`logout` 明确为删除存根行使会话立即失效（不仅清 Cookie）、`me` 两通道均可鉴权，并补鉴权失败统一 401 / 角色不足 403 / 停用即删全部存根的口径。依据：技术方案 §6「会话机制」段与 §4.2 `sessions` 表（第 13 张）。

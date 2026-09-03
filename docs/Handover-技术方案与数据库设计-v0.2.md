@@ -23,6 +23,7 @@
 12. **液氧夜间用量联动（2026-08-31）**：PRD v0.2.8 定案夜间用量口径——跨记录自动计算"昨日 20:30 → 今日 8:30"差值，换罐日（两条记录 tank_in_use 不同）不计算并标注"当日换罐"；§4.3 口径由"待确认"转确认，夜间防泄漏窗口（降幅 0.8）随之解锁；§10 Phase 2 夜间液氧窗口监控由"若口径确认"转确定上线；§11 换罐边界场景关闭；头部与 §1 的 PRD 引用更新至 v0.2.8
 13. **决策记录建立（2026-08-31）**：《决策记录 v1.0》产出（产品/技术/流程三类编号，记"为什么这么定"与当时备选），关联文档指针由"待建"更新为《决策记录 v1.0》
 14. **技术栈确认闭环（2026-08-31）**：总务科确认采用 TypeScript 全栈（决策记录 D-T01 转 ✅）；§2 取舍记录与 §9 第 1 项同步关闭，剩服务器资源、数据库实例、账号体系三项待信息科；决策记录指针更新至 v1.1
+15. **会话载体定案（2026-09-02）**：TK-04 认证模块开工前定案 **D-T13**（服务端会话落库 + Cookie/Bearer 双通道）——§4.1 表清单与 §4.2 增 `sessions` 表（**第 13 张**：`token_hash` 主键存 SHA-256 摘要、`user_id`、`ip`、`user_agent`、`channel`、`created_at`/`last_seen_at`/`expires_at`），§6 补「会话机制」段（双通道共用同一存根、滑动超时取 `configs.session_timeout_minutes`、登出/停用即时撤销、定时清理过期行）；否决 JWT 无状态与内存 session 的理由见决策记录 D-T13。联动：《API 契约》§1 认证行由「建立会话（Cookie）」扩为双通道、《开发种子数据》增 `session_timeout_minutes` 键（默认 720，❓ 待科长确认）。**表数由 12 张变 13 张**，TK-02 判据「schema 与 §4.2 DDL 逐列核对无异」随之覆盖新表（需新增 drizzle 迁移）
 
 ---
 
@@ -95,6 +96,7 @@
 | 表 | 职责 |
 | --- | --- |
 | users | 账号（师傅/科长），实名一人一号 |
+| sessions | 会话存根：登录令牌摘要 + 设备/IP + 超时（Cookie 与 Bearer 双通道共用，D-T13） |
 | schedules | 排班表：某天谁值班（驱动接班人自动带出） |
 | records | 交接记录主表：状态流转 + 全部读数固定列 |
 | record_versions | 记录修改历史版本（异议退回修改留痕） |
@@ -121,6 +123,21 @@ CREATE TABLE users (
   created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='人员账号';
+
+-- 会话存根（D-T13：服务端会话落库；Cookie 与 Bearer 双通道共用同一存根）
+CREATE TABLE sessions (
+  token_hash   CHAR(64)     NOT NULL PRIMARY KEY COMMENT 'SHA-256(令牌) 摘要，不存明文；拖库也不能冒用在线会话',
+  user_id      INT          NOT NULL,
+  ip           VARCHAR(64)  NULL COMMENT '登录来源 IP（C-05）',
+  user_agent   VARCHAR(200) NULL COMMENT '设备/客户端标识（C-05 登录设备可追溯）',
+  channel      ENUM('cookie','bearer') NOT NULL DEFAULT 'cookie' COMMENT '凭证下发通道：浏览器 cookie / 小程序等 bearer',
+  created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '最后活跃时刻（滑动超时判定）',
+  expires_at   DATETIME NOT NULL COMMENT '过期时刻 = last_seen_at + configs.session_timeout_minutes',
+  CONSTRAINT fk_sess_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  INDEX idx_sess_user (user_id),
+  INDEX idx_sess_exp (expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='会话存根';
 
 -- 排班（一天一人；接班人自动带出依赖此表）
 CREATE TABLE schedules (
@@ -349,6 +366,15 @@ NestJS 全局拦截器统一记录：配置中心任何修改（新旧值）、�
 ## 6. 安全设计
 
 账号实名一人一号、密码加盐哈希存储、会话超时自动退出；接口按角色鉴权（师傅：填写与确认；科长：全部 + 配置）；SQL 注入由 Drizzle 参数化天然防护；内网启用 HTTPS（院内自签证书即可，手机首次访问时信任）；照片与签名图仅科长与当事人可调阅（权限随记录）。账号共用风险的对治：登录设备记录 + 签名时显示姓名二次确认（见 PRD 风险表）。
+
+**会话机制（D-T13，2026-09-02 定案）**：登录成功后服务端生成随机会话令牌（≥ 32 字节），**仅存其 SHA-256 摘要**入 `sessions` 表，令牌本身经两条通道之一下发：
+
+- **浏览器（师傅端 H5、科长后台）**：`HttpOnly` + `SameSite=Lax` Cookie——JS 读不到故防 XSS 窃取；生产由 Nginx 同源反代（§3 架构图），开发期经 Vite `/api` 代理，两者浏览器视角均为同源，无需 CORS credentials
+- **非浏览器客户端**（专有钉钉/企微内网小程序等，D-P03 预留对接）：登录响应体返回令牌，客户端存本地并每次请求放 `Authorization: Bearer <令牌>` 头
+
+服务端守卫**先查 Header 再回落 Cookie**，两条路命中同一存根，共用一套校验与撤销逻辑（故将来接小程序无需重构认证层）。超时采**滑动窗口**：每次通过鉴权的请求刷新 `last_seen_at` 并将 `expires_at` 顺延 `configs.session_timeout_minutes`（种子默认 720 分钟 = 12 小时，对齐 24 小时班制使师傅当班期间不被反复踢出；❓ 具体时长待科长确认）；超时后请求返回 401 `UNAUTHENTICATED`。
+
+**撤销即时生效的三处**（这是不选 JWT 的核心原因）：登出删除存根行；账号停用（F6-02「停用即不可登录」）时删除该用户全部存根行，已在线设备下一次请求即 401；过期行由定时任务清理（同 §5 定时任务体系）。令牌不承载业务信息、每次请求回表校验，故不存在 JWT 式「签发后到期前无法撤销」的安全窗口。
 
 ---
 
