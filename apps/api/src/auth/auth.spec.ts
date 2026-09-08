@@ -15,7 +15,7 @@ import { createHash } from 'node:crypto';
 import type { Server } from 'node:http';
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
-import { eq, gt } from 'drizzle-orm';
+import { eq, gt, inArray } from 'drizzle-orm';
 import request from 'supertest';
 import { AppModule } from '../app.module';
 import { configureApp } from '../app.setup';
@@ -46,6 +46,18 @@ describe('F1-11 账号密码登录（TK-04）', () => {
   let server: Server;
   /** 测试前的审计行 id 上界：结束时只清理本测试新增的行，不动种子数据 */
   let auditHighWater = 0;
+  /**
+   * 本测试内临时停用过的账号（种子 5 个账号全为 active）。
+   * afterAll 只还原登记在此的账号，**不做全表 status 重置**——全表重置会掩盖其他测试或
+   * 手工改动留下的状态，让"谁把账号停用了"无从追查。新增停用动作一律走 disableUser()。
+   */
+  const disabledHere = new Set<string>();
+
+  /** 临时停用账号并登记还原（替代直接 db.update，避免漏还原） */
+  async function disableUser(username: string): Promise<void> {
+    await db.update(users).set({ status: 'disabled' }).where(eq(users.username, username));
+    disabledHere.add(username);
+  }
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
@@ -62,10 +74,15 @@ describe('F1-11 账号密码登录（TK-04）', () => {
   });
 
   afterAll(async () => {
-    // 还原测试对库的改动：新增审计行、全部会话存根、被临时停用的账号（种子 5 个账号全为 active）
+    // 还原测试对库的改动：新增审计行、全部会话存根、本测试临时停用的账号
     await db.delete(auditLogs).where(gt(auditLogs.id, auditHighWater));
     await db.delete(sessions);
-    await db.update(users).set({ status: 'active' });
+    if (disabledHere.size > 0) {
+      await db
+        .update(users)
+        .set({ status: 'active' })
+        .where(inArray(users.username, [...disabledHere]));
+    }
     // 关闭应用触发 DbModule.onApplicationShutdown 结束连接池，否则 Jest 进程不退出
     await app.close();
   });
@@ -149,8 +166,8 @@ describe('F1-11 账号密码登录（TK-04）', () => {
   });
 
   it('F1-11-T3：已停用账号 → 登录 → 拒绝，提示停用而非报错', async () => {
-    // 种子 5 个账号全为 active（《开发种子数据》§一），故测试内临时停用 liu，afterAll 统一还原
-    await db.update(users).set({ status: 'disabled' }).where(eq(users.username, 'liu'));
+    // 种子 5 个账号全为 active（《开发种子数据》§一），故测试内临时停用 liu，afterAll 按登记还原
+    await disableUser('liu');
 
     const res = await request(server)
       .post(`${API}/login`)
@@ -231,7 +248,7 @@ describe('F1-11 账号密码登录（TK-04）', () => {
       await request(server).get(`${API}/me`).set(auth).expect(200);
 
       // 科长停用该账号（F6-02 的正式接口在 TK-2x，此处直接改库模拟该动作的结果）
-      await db.update(users).set({ status: 'disabled' }).where(eq(users.username, 'chief'));
+      await disableUser('chief');
 
       const res = await request(server).get(`${API}/me`).set(auth).expect(401);
       expectApiErrorShape(res.body, 'UNAUTHENTICATED');

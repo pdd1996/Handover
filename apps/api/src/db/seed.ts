@@ -1,4 +1,5 @@
 import bcrypt from 'bcryptjs';
+import { DEFAULT_SHIFT_START, shiftDutyDate } from '../records/duty-date';
 import { createDb } from './connection';
 import {
   alerts,
@@ -24,12 +25,14 @@ import {
 
 const DEV_PASSWORD = 'Handover@2026';
 
-// ── 日期工具：D0 = 今日，偏移量为天 ────────────────────────
-const pad = (n: number) => String(n).padStart(2, '0');
+// ── 日期工具：D0 = 当前班次起始日（C-08，与 service 的 resolveDutyDate 同源 ./records/duty-date），
+// 偏移量为天。凌晨（早于 shift_start_time）灌种子时 D0 = 昨日班次，保证"D0 留空"恒与
+// 接口返回的 duty_date 对齐，任何时刻重灌/重跑测试都不会撞上 D-1 的种子记录 ──────────────
+const D0 = shiftDutyDate(new Date(), DEFAULT_SHIFT_START);
 const d = (offset: number): string => {
-  const t = new Date();
-  t.setDate(t.getDate() + offset);
-  return `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())}`;
+  const t = new Date(`${D0}T00:00:00Z`);
+  t.setUTCHours(t.getUTCHours() + offset * 24);
+  return t.toISOString().slice(0, 10);
 };
 const dt = (offset: number, time: string): string => `${d(offset)} ${time}`;
 const recordNo = (offset: number): string => `HB-${d(offset).replaceAll('-', '')}-001`;
@@ -138,6 +141,12 @@ async function main(): Promise<void> {
       key: 'session_timeout_minutes',
       value: '720',
       remark: '❓ 会话滑动超时（分钟）待科长确认；种子值 12 小时对齐 24 小时班制（D-T13）',
+    },
+    {
+      key: 'shift_start_time',
+      value: DEFAULT_SHIFT_START,
+      remark:
+        '❓ 班次起始时刻待科长确认；C-08 duty_date 分界：当地时刻早于此值归昨日班次（种子值对齐液氧早间时点）',
     },
     {
       key: 'missing_submit_deadline',
@@ -476,7 +485,7 @@ async function main(): Promise<void> {
     users: 5,
     schedules: 22,
     spots: 11,
-    configs: 18,
+    configs: 19,
     elevators: 8,
     records: 10,
     record_versions: 2,

@@ -6,7 +6,7 @@
     "dev": "nest start --watch",
     "build": "nest build",
     "start": "node dist/main.js",
-    "test": "jest",
+    "test": "jest --runInBand",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/db/migrate.ts",
     "db:seed": "tsx src/db/seed.ts",
@@ -46,6 +46,7 @@
     "testEnvironment": "node",
     "testMatch": [
       "<rootDir>/src/**/*.spec.ts"
-    ]
+    ],
+    "maxWorkers": 1
   }
 }

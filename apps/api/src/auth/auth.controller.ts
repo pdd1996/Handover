@@ -52,7 +52,10 @@ function toDto(user: SessionUser): AuthUserDto {
  * 避免无条件信任可伪造的请求头污染审计。
  */
 function clientContext(req: Request): ClientContext {
-  return { ip: req.ip ?? req.socket.remoteAddress ?? null, userAgent: req.headers['user-agent'] ?? null };
+  return {
+    ip: req.ip ?? req.socket.remoteAddress ?? null,
+    userAgent: req.headers['user-agent'] ?? null,
+  };
 }
 
 /** Cookie 下发选项（技术方案 §6：HttpOnly + SameSite=Lax；内网生产启用 HTTPS） */
