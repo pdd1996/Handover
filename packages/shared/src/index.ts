@@ -5,6 +5,8 @@
  * - enums：状态/角色/电梯/错误码枚举（技术方案 §4.2、《API 契约》§2）
  * - sections：十板块定义（PRD 附录 A）
  * - fields：records 字段字典（附录 A + §4.2，DATA-11）
+ * - cards：首页 12 张任务卡字典与卡片→字段映射（PRD §6.0/§6.1，F1-02/F1-03；TK-05）
+ * - dto：API 契约响应类型（按契约 §3 路由分节；api 产出、h5/admin 消费同一份）
  * - errors：统一错误响应结构 + 锚点生成（《API 契约》§2/§4，C-09）
  *
  * 消费方式：h5/admin 经 Vite alias 直用本 TS 源码；api 经 dist（先 `pnpm --filter @handover/shared build`）。
@@ -13,6 +15,8 @@
 export * from './enums';
 export * from './sections';
 export * from './fields';
+export * from './cards';
+export * from './dto';
 export * from './errors';
 
 import type { ApiError, MissingField } from './errors';

@@ -1,0 +1,128 @@
+/**
+ * API 契约的响应类型 —— 三端同源（TK-05 起）。
+ *
+ * 定位：《API 契约 v0.1》各路由的响应形状在此定义一次，api 端产出、h5/admin 端消费同一份类型，
+ * 杜绝前后端各写一份 interface 而随迭代漂移（与 fields/cards 字典同源的同一理由）。
+ * 命名沿用蛇形（`duty_date`、`spot_name`）——与契约 §2/§3 的 JSON 字段名逐字对应。
+ *
+ * 组织方式：按契约 §3 的路由分节。本轮仅落 §3.2 首条路由 GET /records/today（TK-05）。
+ *
+ * 注：认证类 DTO（AuthUserDto / LoginResponseDto）目前仍在 `apps/api/src/auth/auth.controller.ts`
+ * ——TK-04 已评审验收，不为迁移而动它；后续接口扩充时一并归入本文件。
+ */
+
+import type { SectionNo } from './sections';
+
+// ── 契约 §3.2 GET /records/today（今日交接首页；F1-01、F1-02、F1-03）─────────
+
+/**
+ * 角标统计（F1-03「卡片角标与顶部进度条实时汇总已填/待填/异常」）。
+ *
+ * `total` 只计**师傅需亲手填或选**的字段（服务端派生列与条件必填/选填不计入），
+ * 口径与依据见 `cards.ts` 的 `isCountableField`。
+ * 注意"已填"与"异常"**不是互斥状态**：状态字段选"异常"时 filled 与 abnormal 同时 +1，
+ * 前端据此分别画进度与变色角标。
+ */
+export interface BadgeDto {
+  /** 已填项数 */
+  filled: number;
+  /** 应填项数（分母） */
+  total: number;
+  /** 待填项数 = total - filled */
+  pending: number;
+  /** 异常项数（Phase 1 即表单级标红项，PRD §6.2） */
+  abnormal: number;
+}
+
+/**
+ * 单字段填写状态。
+ * **只给动态状态**——静态元数据（label / unit / kind / fill）由前端从 shared 的 `FIELD_BY_NAME`
+ * 取，接口不重复传输，也避免两处元数据各说一套。
+ */
+export interface CardFieldStateDto {
+  /** records 列名（= 字段字典的 name） */
+  name: string;
+  /** 是否计入"应填"分母（TK-05 静态口径，TK-06 落地 F1-08 后转动态判定） */
+  required: boolean;
+  filled: boolean;
+  abnormal: boolean;
+  /** 原值（decimal 列为字符串，与 Drizzle 一致）；无记录或未填为 null */
+  value: unknown;
+}
+
+/** 一张任务卡（F1-02） */
+export interface CardDto {
+  /** 卡片稳定标识（shared `CardKey`；前端锚点与板块页路由参数） */
+  key: string;
+  /** spots 表行 id（点位字典后台可维护，F6-07） */
+  spot_id: number;
+  spot_name: string;
+  sort_no: number;
+  /** 卡片标题（点位名） */
+  title: string;
+  /** 到点卡时段槽（液氧 'am'/'pm'）；非到点卡为 null */
+  slot: string | null;
+  /** 时段展示文案（'8:30' / '20:30'）；非到点卡为 null */
+  slot_label: string | null;
+  /** 主板块号（= sections 首位），用于卡片标题归类 */
+  section: SectionNo;
+  section_label: string;
+  /**
+   * 本卡覆盖的全部板块。多数卡为单板块；值班室卡兼管板块八「节能减排」→ `[10, 8]`
+   * （该板块无 spots 点位但 PRD §6.1 要求十板块完整可填，见 `cards.ts` 头部说明）。
+   */
+  sections: SectionNo[];
+  /** form = 走 records 字段填写；elevator = 走 elevator_checks 逐台核对（契约 §3.3，TK-17） */
+  kind: string;
+  badge: BadgeDto;
+  fields: CardFieldStateDto[];
+}
+
+/**
+ * 板块填写状态汇总（契约 §3.2「各板块填写状态」）。
+ * 按**字段真实板块号**聚合（非卡片归属），故覆盖板块 1–10；板块 0（基础信息）自动带出、不属巡检卡。
+ * 板块九（电梯）无 records 字段但仍出现（total=0），因其有卡且核对状态走 elevator_checks。
+ */
+export interface SectionStateDto {
+  no: SectionNo;
+  key: string;
+  label: string;
+  badge: BadgeDto;
+}
+
+/**
+ * 今日记录状态。当日无记录为 **null**——GET /records/today 是只读接口，不创建 draft 行
+ * （理由见 `records.service.ts` 头部：record_no 提交时才生成、技术方案 §11 draft 时机未关闭、
+ * 种子 D0 刻意留空）。draft 行的产生留给 TK-08（PUT /records/today/draft）。
+ */
+export interface TodayRecordDto {
+  id: number;
+  record_no: string;
+  /** draft / submitted / objection / completed（技术方案 §5.4 状态机） */
+  status: string;
+  version: number;
+  submitted_at: string | null;
+}
+
+/** GET /records/today 响应体 */
+export interface TodayDto {
+  /** 班次起始日（C-08「记录日期=班次起始日，非提交日」）；一切查询与展示以此为准 */
+  duty_date: string;
+  /** 班次分界时刻（回显便于排查跨天归属；❓ 待科长确认，台账待确认清单第 8 项） */
+  shift_start_time: string;
+  record: TodayRecordDto | null;
+  /**
+   * 待同步标记。**TK-05 阶段恒为 false 的占位**：离线待同步队列存于客户端 IndexedDB，
+   * 服务器对其零感知（F1-07-T2 判据「服务器无感知（无 draft 泄露）」），故服务端无从返回真值。
+   * 真值由前端本地队列决定并与本字段做 OR 合并（TK-08 草稿层 / TK-15 离线三层缓冲接管）。
+   */
+  pending_sync: boolean;
+  /** 交班人 = 登录账号（技术方案修订 9：submitter_id 恒以登录人为准） */
+  submitter: { id: number; real_name: string };
+  /** 接班人：TK-12 按排班表自动带出（DATA-10），本阶段恒为 null */
+  receiver: { id: number; real_name: string } | null;
+  /** 顶部进度条（F1-03）：12 张卡角标之和 */
+  progress: BadgeDto;
+  sections: SectionStateDto[];
+  cards: CardDto[];
+}
