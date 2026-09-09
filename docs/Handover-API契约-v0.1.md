@@ -75,7 +75,7 @@
 
 | 方法与路径 | 角色 | 用途 | 关联规格 | 契约要点 |
 | --- | --- | --- | --- | --- |
-| GET `/records/today` | master | 首页卡片汇总 | F1-01、F1-02、F1-03 | 返回各板块填写状态、角标统计、今日记录状态、待同步标记 |
+| GET `/records/today` | master,chief | 首页卡片汇总 | F1-01、F1-02、F1-03 | 返回各板块填写状态、角标统计、今日记录状态、待同步标记 |
 | GET `/records/today/prev` | master | 上一班读数带出 | F1-05、DATA-02 | 按 duty_date 取前一条**已提交**记录；含液氧昨日 20:30 值；无则返回 `first_day: true`（F1-15） |
 | GET `/records/today/draft` | master | 读取在线草稿 | F1-09 | 服务端 draft 暂存（离线草稿在客户端，不经此接口） |
 | PUT `/records/today/draft` | master | 保存草稿（局部） | F1-09 | 不做业务校验，仅结构与范围检查 |
@@ -175,3 +175,4 @@
 1. **v0.1（2026-09-01）**：初稿。定义统一错误结构（C-09 落地：`missing_fields[].field/section/label/anchor`）、错误码表 14 项、Phase 1 路由 32 条（认证 3 / 今日交接与异议 10 / 电梯 2 / 确认 5 / 历史通知 3 / 后台 9，另预警中心与趋势 2 条 ⏸）、提交协议六步与服务端固化口径（DATA-09）、审计联动表。
 2. **v0.1 订正（2026-09-02）**：TK-03（共享类型与错误契约）代码 review 后补明 §2 `missing_fields[]` 的取值口径：① `field` 除 records 列名外，**电梯核对行以 `elevator:{id}` 点名**——明细落 `elevator_checks` 逐台一行、records 无对应列，而 ELE-04-T2（不一致未填说明→拒绝）与 ELE-07-T1（无说明→「拦截并点名」）同受 C-09 约束，须支持点击跳转定位（原稿未明文，实现侧易误认为电梯不走点名结构）；② `section` 明确含 0（基础信息，如 `receiver_change_reason` 条件必填）与 9（电梯）；③ `anchor` 生成式写明为 `#sec-{板块号}-{field 的 kebab 形式}`（`_` 与 `:` 均转 `-`，如 `#sec-2-hp-status`、`#sec-9-elevator-3`）；④ 错误码表 ELEVATOR_EXPLANATION_REQUIRED 行补注点名形态。**另订正条目 1 的笔误：错误码表实为 13 项（原文写「14 项」）；条目 1 按「修订记录只追加不删除」纪律保留原文不改，以本条为准**。代码侧同步落地：`packages/shared/src/errors.ts` 的 `MissingTarget` / `fieldAnchor` / `toElevatorMissingField`、`sections.ts` 的 `ELEVATOR_SECTION_NO`。
 3. **v0.1 修订（2026-09-02）**：TK-04（认证与账号）开工，按决策记录 **D-T13** 更新认证口径——§1「认证」行由「账号密码登录建立会话（Cookie）」扩为**双通道**（浏览器 HttpOnly Cookie / 非浏览器客户端 `Authorization: Bearer`，共用同一 `sessions` 存根；守卫先查 Header 再回落 Cookie；滑动超时取 configs `session_timeout_minutes`）；§3.1 三条路由补契约要点：`login` 请求体增可选 `channel`（默认 `cookie`；**`cookie` 通道响应体不返回令牌**以防 XSS 窃取、`bearer` 通道返回 `token`）、`logout` 明确为删除存根行使会话立即失效（不仅清 Cookie）、`me` 两通道均可鉴权，并补鉴权失败统一 401 / 角色不足 403 / 停用即删全部存根的口径。依据：技术方案 §6「会话机制」段与 §4.2 `sessions` 表（第 13 张）。
+4. **v0.1 订正（2026-09-09）**：TK-05 实现评审跟进——§3.2 `GET /records/today` 角色列由 `master` 回写为 `master,chief`：实现已按 §1「chief（科长：全部 + 配置）」口径放行科长只读访问（`records.spec.ts` 固化用例钉死），原格子仅写 master 属文档遗漏，不另立守卫规则；§3.2 其余路由角色列不变（写入/提交链路是否覆盖 chief 待各任务落地时按同一口径回写）。
