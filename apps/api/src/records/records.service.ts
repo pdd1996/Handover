@@ -119,7 +119,7 @@ export class RecordsService {
   async today(user: SessionUser, now: Date = new Date()): Promise<TodayDto> {
     const { dutyDate, shiftStart } = await this.resolveDutyDate(now);
 
-    // 三路并发取数：当日记录、点位字典（卡片由它驱动）、当日排班（仅用于日志排查，接班人带出属 TK-12）
+    // 两路并发取数：当日记录、点位字典（卡片由它驱动）；当日排班取数（接班人带出）随 TK-12 落地后接入
     const [recordRows, spotRows] = await Promise.all([
       this.db
         .select({

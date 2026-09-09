@@ -348,6 +348,15 @@ describe('F1-01/F1-02/F1-03 今日交接首页（TK-05）', () => {
   });
 
   describe('F1-03-T1：角标与顶部进度条实时汇总已填/待填/异常', () => {
+    it('分母黄金值 = 38（哨兵：改分母口径必须以可读失败强制人工核对规格）', () => {
+      // 其余用例用 COUNTABLE_FIELD_TOTAL 与接口对照，属同一字典自证（同源盲区）；
+      // 此处钉死字面量：若 cards.ts 的 fill 口径、CONDITIONAL/OPTIONAL 集合或卡片字段清单
+      // 变化导致分母漂移，本用例会爆，需人工比对台账 F1-03 与决策记录 D-T16 后再改数。
+      // 实算分解（12 卡）：water 1 + electricity 3 + gas 2 + lo_am 5 + lo_pm 2 + cylinder 9
+      //   + boiler 2 + cooling 2 + pump 10 + hvac 2 + elevator 0 + duty_desk 0 = 38
+      expect(COUNTABLE_FIELD_TOTAL).toBe(38);
+    });
+
     it('当日无记录 → 全部待填：filled=0、pending=total、abnormal=0', async () => {
       const body = await fetchToday();
 

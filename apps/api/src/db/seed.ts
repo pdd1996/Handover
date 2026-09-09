@@ -109,7 +109,7 @@ async function main(): Promise<void> {
     { name: '值班室', sortNo: 110 },
   ]);
 
-  // ── 四、配置中心（全量 17 键；❓ 占位见文档第四节）─────────
+  // ── 四、配置中心（全量 19 键；❓ 占位见文档第四节）─────────
   const configRows: Array<{ key: string; value: string; remark: string }> = [
     {
       key: 'lo_threshold',
@@ -160,6 +160,18 @@ async function main(): Promise<void> {
     },
     { key: 'boiler_list', value: JSON.stringify(['1号', '2号']), remark: '❓ 锅炉清单待总务科' },
   ];
+
+  // 自洽断言：模块顶部的 D0 基准用常量 DEFAULT_SHIFT_START，而 service 读的是库里的
+  // shift_start_time——两处若日后被分别改动，seed 与接口会在「旧分界–新分界」窗口内再次错位
+  // （正是当初凌晨窗口缺陷的成因），故入库前校验，不一致即 seed 失败退出。
+  const shiftStartCfg = configRows.find((c) => c.key === 'shift_start_time')?.value;
+  if (shiftStartCfg !== DEFAULT_SHIFT_START) {
+    throw new Error(
+      `[db:seed] 自洽失败：configs shift_start_time=${JSON.stringify(shiftStartCfg)} ` +
+        `与 D0 基准 DEFAULT_SHIFT_START=${DEFAULT_SHIFT_START} 不一致，请同步修改两处后重灌`,
+    );
+  }
+
   await db.insert(configs).values(
     configRows.map((c) => ({
       configKey: c.key,
