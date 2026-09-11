@@ -9,6 +9,10 @@
  * - 多选控件交互回归（TK-06 评审 M1）：勾选/取消写入草稿、全不勾回退未填——
  *   此前 E2E 仅对 radio/input/完成按钮有交互，多选（checkbox）零覆盖，
  *   导致 `as string[]` 类型断言的运行时崩溃（value.push is not a function）未被发现
+ * - 新风候选数据源消费证据（TK-11 评审 M2，DATA-07）：route 拦截 /configs 回非种子
+ *   候选集，断言复选框随响应渲染且占位三项不出现——候选清单与种子占位逐字相同，
+ *   若数据源链路断开（configs 恒 null 走回落）既有勾选断言仍全绿（静默绿），
+ *   本用例使「前端消费的候选真来自后端」成为可失败断言
  * - 附带验证 TK-06 的实时角标链路：卡内填齐 → 完成返回首页 → 角标转「已填」（F1-03 同源口径）
  *
  * **不 import @handover/shared**（与 today.spec.ts 同理由）：E2E 是契约的外部观察者；
@@ -150,6 +154,34 @@ test.describe('F1-08-T1（多选控件交互路径，TK-06 评审 M1 回归）�
     await expect(
       page.getByTestId('section-error-panel').getByTestId('error-item-hvac_locs'),
     ).toBeVisible();
+  });
+});
+
+test.describe('DATA-07-T1（前端消费半边，TK-11 评审 M2）：新风候选来自 GET /configs 响应', () => {
+  test('拦截 /configs 回非种子候选集 → 复选框随响应渲染，占位三项不出现', async ({ page }) => {
+    // FALLBACK 占位与种子值逐字相同（手术部/ICU/门诊大厅）：数据源链路断开时既有断言仍绿。
+    // route 拦截须在 login（内部 goto）之前注册——configs 拉取发生在登录后的 loadToday 内
+    await page.route('**/api/v1/configs', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ hvac_locs: ['A区', 'B区'], boiler_list: ['1号', '2号'] }),
+      }),
+    );
+    await login(page);
+    await page.getByTestId('task-card-hvac').click();
+
+    const group = page.getByTestId('input-hvac_locs');
+    // 候选 = 响应体（2 项），而非回落占位（3 项）：占位三项一项都不出现
+    await expect(group.locator('.van-checkbox')).toHaveCount(2);
+    await expect(group.locator('.van-checkbox').filter({ hasText: 'A区' })).toBeVisible();
+    await expect(group.locator('.van-checkbox').filter({ hasText: '手术部' })).toHaveCount(0);
+    await expect(group.locator('.van-checkbox').filter({ hasText: 'ICU' })).toHaveCount(0);
+    await expect(group.locator('.van-checkbox').filter({ hasText: '门诊大厅' })).toHaveCount(0);
+
+    // 勾选交互照常（数组结构与 writeValue 链路不因数据源切换退化）
+    await group.locator('.van-checkbox').filter({ hasText: 'A区' }).click();
+    await expect(group.locator('.van-checkbox__icon--checked')).toHaveCount(1);
   });
 });
 
