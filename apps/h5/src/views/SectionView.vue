@@ -19,6 +19,11 @@
  *   取上一班记录的 20:30 字段，映射用 shared `prevSourceField`，DATA-02）；首班显「首班记录」
  *   提示（F1-15）、上一班缺失显缺失提示（F3-07）。
  *
+ * - **锅炉停机联动**（TK-10，DATA-05）：boiler_run ≠ 'run' 时锅炉号/出水/回水温度三行置灰
+ *   禁填（shared `isDisabledField`，与必填口径共用同一集合；未选按未运行处理的保守口径
+ *   见 cards.ts 注释）+「选运行后填」标记；选「停机」即清空三项停机列，已展开的 C-09
+ *   报错面板随清列后状态整体重算（清单与实际一致，评审 m3）。
+ *
  * 选项来源边界：`boiler_no` / `hvac_locs` 的候选清单读 configs（TK-11 配置只读端点），
  * 本阶段用《开发种子数据》占位值渲染并在常量处标注 ❓，接入后仅换数据源、结构不变。
  */
@@ -29,6 +34,8 @@ import {
   fieldAnchor,
   validateForError,
   isRequiredField,
+  isDisabledField,
+  REQUIRED_WHEN_BOILER_RUN,
   isFilledValue,
   prevSourceField,
   measuredAtTarget,
@@ -193,6 +200,7 @@ interface FieldRow {
   fill: string;
   fillLabel: string;
   required: boolean;
+  disabled: boolean;
   filled: boolean;
   abnormal: boolean;
   anchor: string;
@@ -221,6 +229,7 @@ const rows = computed<FieldRow[]>(() =>
       fill: def?.fill ?? '',
       fillLabel: FILL_LABEL[def?.fill ?? ''] ?? def?.fill ?? '',
       required: def ? isRequiredField(name, get) : f.required,
+      disabled: def ? isDisabledField(name, get) : false,
       filled: isFilledValue(value),
       abnormal: def?.kind === 'status' && value === 'bad',
       // 锚点与 C-09 点名结构同一函数生成（errors.ts fieldAnchor），跳转才能两端对上
@@ -242,6 +251,28 @@ function displayValue(row: FieldRow): string {
 function writeValue(name: RecordFieldName, v: unknown): void {
   draft.setValue(name, v);
   errorFields.value.delete(name);
+
+  // 锅炉停机联动（DATA-05，TK-10）：选「停机」即清空停机三项——判据「停机列留空且提交通过」。
+  // 先填后改停机的残留读数若不清，会以草稿值随提交上送，违反「置灰不填」；清键（null）
+  // 即从草稿移除，与 FieldValueGetter「未填 → null」口径一致。名单取 shared 同一集合
+  // （与 isDisabledField/isRequiredField 同源，不另维护清单）。落库侧另有第二道防线：
+  // TK-12 submit 时 boiler_run='stop' → 三项强制写 NULL（服务端旧值不因本机草稿为空而复活）
+  if (name === 'boiler_run' && v === 'stop') {
+    for (const gated of REQUIRED_WHEN_BOILER_RUN) {
+      draft.setValue(gated, null);
+      errorFields.value.delete(gated);
+    }
+    // C-09 清单与实际一致（评审 m3）：已禁填字段清列后必不再被点名——已展开的报错面板
+    // 按清列后状态整体重算（与 onComplete 同一校验引擎），不让师傅对着已消失的字段找错；
+    // 全部解除时面板收起、高亮同步清除
+    if (missingFields.value) {
+      const names = props.card.fields.map((f) => f.name as RecordFieldName);
+      const body = validateForError(names, get);
+      missingFields.value = body ? body.missing_fields : null;
+      errorMessage.value = body ? body.message : '';
+      if (!body) errorFields.value.clear();
+    }
+  }
 
   // 实际测量时刻自动记录（DATA-13/D-P12，TK-09）：写液氧读数时随读数把本机时刻写入草稿——
   // 离线时即为本地时间戳幸存于 IndexedDB（T2 判据客户端半边），提交时随 payload 上送（TK-12），
@@ -380,6 +411,7 @@ const headerTitle = computed(() =>
           :data-field-name="row.name"
           :data-field-kind="row.kind"
           :data-field-unit="row.unit ?? ''"
+          :data-field-disabled="row.disabled ? 'true' : 'false'"
           class="field-row px-4 py-3"
           :class="{
             'field-row-error': errorFields.has(row.name),
@@ -390,19 +422,22 @@ const headerTitle = computed(() =>
             <span class="text-base text-slate-800">{{ row.label }}</span>
             <!-- 单位全程标注（F1-08-T3）：data-field-unit 供 E2E 断言 -->
             <span v-if="row.unit" class="text-xs font-bold text-slate-500">({{ row.unit }})</span>
-            <van-tag v-if="row.abnormal" type="danger" size="medium">异常</van-tag>
+            <van-tag v-if="row.disabled" plain type="warning" size="medium">选运行后填</van-tag>
+            <van-tag v-else-if="row.abnormal" type="danger" size="medium">异常</van-tag>
             <van-tag v-else-if="!row.required" plain type="primary" size="medium">选填</van-tag>
           </div>
           <div class="mt-0.5 text-xs text-slate-400">{{ row.fillLabel }} · {{ row.name }}</div>
 
           <div class="mt-2">
-            <!-- 数值：数字键盘（F1-04）；draft 存字符串，校验引擎统一解析 -->
+            <!-- 数值：数字键盘（F1-04）；draft 存字符串，校验引擎统一解析；
+                 停机置灰（DATA-05）：禁用控件 + vant 灰化样式 -->
             <van-field
               v-if="row.kind === 'number' && row.fill === 'manual'"
               :model-value="String(modelOf(row.name))"
               type="number"
               inputmode="decimal"
               :name="row.name"
+              :disabled="row.disabled"
               :placeholder="`请输入读数（${row.unit ?? ''}）`"
               class="rounded-lg bg-slate-50 px-3"
               :data-testid="`input-${row.name}`"
@@ -421,11 +456,12 @@ const headerTitle = computed(() =>
               <van-radio name="bad">异常</van-radio>
             </van-radio-group>
 
-            <!-- 枚举单选：选项与 schema mysqlEnum 逐项一致 -->
+            <!-- 枚举单选：选项与 schema mysqlEnum 逐项一致；停机置灰（DATA-05）整组禁用 -->
             <van-radio-group
               v-else-if="row.kind === 'enum' && ENUM_OPTIONS[row.name]"
               :model-value="modelOf(row.name)"
               direction="horizontal"
+              :disabled="row.disabled"
               :data-testid="`input-${row.name}`"
               @update:model-value="(v: unknown) => writeValue(row.name, v)"
             >
