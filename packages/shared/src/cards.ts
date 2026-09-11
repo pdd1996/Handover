@@ -436,8 +436,14 @@ const NOTE_REQUIRED_WHEN_BAD: Readonly<Partial<Record<RecordFieldName, RecordFie
   hvac_note: 'hvac_status',
 };
 
-/** 运行期才必填的字段：锅炉运行（boiler_run='run'）时锅炉号/出水/回水温度必填，停机不填（DATA-05） */
-const REQUIRED_WHEN_BOILER_RUN: ReadonlySet<RecordFieldName> = new Set<RecordFieldName>([
+/**
+ * 锅炉运行三项：boiler_run='run' 时必填，停机（含未选运行/停机）置灰不填
+ * （DATA-05、TK-10）。
+ *
+ * **必填口径（isRequiredField 规则 4）与置灰交互（isDisabledField）共用本集合**——
+ * 两处清单若各自维护必然漂移，故收敛到单一来源；新增停机联动字段只改这里。
+ */
+export const REQUIRED_WHEN_BOILER_RUN: ReadonlySet<RecordFieldName> = new Set<RecordFieldName>([
   'boiler_no',
   'supply_temp',
   'return_temp',
@@ -475,6 +481,25 @@ export function isRequiredField(name: RecordFieldName, get: FieldValueGetter): b
   if (noteTrigger) return get(noteTrigger) === STATUS_BAD;
   if (REQUIRED_WHEN_BOILER_RUN.has(name)) return get('boiler_run') === BOILER_RUN_ON;
   return true;
+}
+
+/**
+ * 停机置灰判定（DATA-05「停机时置灰不填」，TK-10）：锅炉未运行（boiler_run ≠ 'run'，
+ * 含尚未选择运行/停机）时，锅炉号/出水/回水温度控件禁填。
+ *
+ * **未选态的保守口径（TK-10 评审 M2）**：PRD 原文只说「停机时置灰」，未规定未选态。
+ * 此处取「未声明运行状态前按未运行处理」——引导师傅先声明运行/停机，且与
+ * `isRequiredField` 规则 4「仅 run 才必填」同门。demo v0.3 的默认置灰来自其脚本预置
+ * boiler_run='stop'（从未出现未选态），**不能**作为「未选即置灰」的验收依据（台账
+ * 增补 #16 订正）；若业务要求未选可填，改本函数谓词为 `=== 'stop'` 并同步
+ * E2E 首断言（boiler-stop.spec.ts 第一条）。
+ *
+ * 只管 h5 **交互态**，不改卡片与接口结构：必填口径仍由 `isRequiredField` 规则 4 收口
+ * （两者共用 REQUIRED_WHEN_BOILER_RUN 单一集合），api 侧提交校验无需感知本函数——
+ * 停机时三项本就不在必填分母（validateFields 停机整卡放行，见 records-boiler.spec.ts）。
+ */
+export function isDisabledField(name: RecordFieldName, get: FieldValueGetter): boolean {
+  return REQUIRED_WHEN_BOILER_RUN.has(name) && get('boiler_run') !== BOILER_RUN_ON;
 }
 
 /**
