@@ -20,8 +20,12 @@ export const SHIFT_TIMEZONE = process.env.SHIFT_TIMEZONE ?? 'Asia/Shanghai';
 /** configs.shift_start_time 缺失或非法时的兜底（种子值 08:30，❓ 待科长确认，台账待确认清单第 8 项） */
 export const DEFAULT_SHIFT_START = '08:30';
 
-/** 当地日历日减一天（按 UTC 算，避开夏令时导致的 23/25 小时日） */
-function minusOneDay(date: string): string {
+/**
+ * 当地日历日减一天（按 UTC 算，避开夏令时导致的 23/25 小时日）。
+ * 导出供带出取数（TK-07/D-T17：上一班 = 今日班次日期 − 1 天）与测试哨兵复用，
+ * 勿在消费方另写日历推算（同班次分界口径的防漂移纪律）。
+ */
+export function minusOneDay(date: string): string {
   const t = new Date(`${date}T00:00:00Z`);
   t.setUTCHours(t.getUTCHours() - 24);
   return t.toISOString().slice(0, 10);

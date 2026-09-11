@@ -1,15 +1,20 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { asc, eq } from 'drizzle-orm';
+import { asc, eq, lt } from 'drizzle-orm';
 import { getTableConfig } from 'drizzle-orm/mysql-core';
 import {
+  FIELDS,
   FIELD_BY_NAME,
   SECTION_BY_NO,
   TASK_CARDS,
-  isCountableField,
+  isFilledValue,
+  isRequiredField,
   type BadgeDto,
   type CardDef,
   type CardDto,
   type CardFieldStateDto,
+  type FieldValueGetter,
+  type PrevDto,
+  type PrevRecordDto,
   type RecordFieldName,
   type SectionNo,
   type SectionStateDto,
@@ -18,9 +23,9 @@ import {
 import type { SessionUser } from '../auth/auth.service';
 import { DB, type Db } from '../db/db.module';
 import { configs, records, spots } from '../db/schema';
-import { DEFAULT_SHIFT_START, shiftDutyDate } from './duty-date';
+import { DEFAULT_SHIFT_START, minusOneDay, shiftDutyDate } from './duty-date';
 
-/** 状态类字段取此值即为"异常"（PRD §6.2：Phase 1 无独立预警，"预警项"指表单级标红项） */
+/** 状态类字段取此值即为"异常"（PRD §6.2：Phase 1 无独立预警，"预警项"指表单级标红项；与 cards.ts STATUS_BAD 同口径） */
 const ABNORMAL_STATUS = 'bad';
 
 /** records 表的 DB 列名集合（用于识别字典里的派生字段，如 lo_night_use 非存储列） */
@@ -48,17 +53,6 @@ function recordKeyOf(fieldName: string, logger: Logger): string | null {
     logger.error(`字段字典与 records schema 漂移：列 ${fieldName} 映射不到 TS 键 ${key}`);
   }
   return null;
-}
-
-/**
- * 是否已填。**数值 0 与布尔 false 均算已填**（0 是有效读数），故不可用 falsy 判定；
- * 空字符串与空数组算未填（handover_note 留空、hvac_locs 未勾选）。
- */
-function isFilled(value: unknown): boolean {
-  if (value === null || value === undefined) return false;
-  if (typeof value === 'string') return value.trim() !== '';
-  if (Array.isArray(value)) return value.length > 0;
-  return true;
 }
 
 /** 是否异常项：状态类字段（kind='status'）值为 bad（附录 A「异常时必填备注，触发预警」） */
@@ -167,6 +161,61 @@ export class RecordsService {
     };
   }
 
+  /** GET /records/today/prev 的完整响应 */
+  async prev(now: Date = new Date()): Promise<PrevDto> {
+    const { dutyDate } = await this.resolveDutyDate(now);
+
+    // D-T17（TK-07 评审定案）：「上一班」= **相邻班次**的记录——duty_date 恰为今日班次日期 − 1 天
+    // （日历事实，复用 duty-date.ts 的 minusOneDay，勿另写日历推算）。相邻日无行（漏交，F6-06
+    // 检测的场景）或该行为 draft（上一班未提交）→ 上一班缺失（F3-07，前端显"—"并允许补录），
+    // **不回落更早记录**——以旧值冒充上一班违反 F1-05-T2 判据「不显示脏数据」，且 TK-13 复用
+    // 同一取数时会把跨天用量当 1 天固化。首班（F1-15）= 今日之前无任何记录。
+    const prevDate = minusOneDay(dutyDate);
+    const [adjacentRows, anyEarlier] = await Promise.all([
+      this.db.select({ row: records }).from(records).where(eq(records.dutyDate, prevDate)).limit(1),
+      this.db
+        .select({ id: records.id })
+        .from(records)
+        .where(lt(records.dutyDate, dutyDate))
+        .limit(1),
+    ]);
+
+    if (anyEarlier.length === 0) {
+      // F1-15 首班：今日之前无任何记录（首次启用，《开发种子数据》D-10 场景）
+      return { duty_date: dutyDate, first_day: true, prev: null };
+    }
+    const adjacent = adjacentRows[0]?.row;
+    if (!adjacent || adjacent.status === 'draft') {
+      // F1-05-T2 / F3-07：相邻班次无已提交记录（漏交或未提交）→ 缺失态（非首班）：
+      // 草稿值不作为带出数据源，也不跳过缺失班次回落更早记录
+      return { duty_date: dutyDate, first_day: false, prev: null };
+    }
+    return { duty_date: dutyDate, first_day: false, prev: this.toPrevRecord(adjacent) };
+  }
+
+  /**
+   * records 行 → 上一班带出体（dto.ts PrevRecordDto）：readings 仅回传字段字典内的
+   * records 存储列（板块 ≥1）——基础信息列在记录级字段已回显，lo_night_use 等派生列
+   * 非存储列。字典与 schema 漂移时经 recordKeyOf 记错误日志而非静默丢字段。
+   */
+  private toPrevRecord(row: typeof records.$inferSelect): PrevRecordDto {
+    const readings: Record<string, unknown> = {};
+    for (const def of FIELDS) {
+      if (def.section === 0) continue; // 基础信息（duty_date/submitted_at 等）走记录级字段
+      const key = recordKeyOf(def.name, this.logger);
+      if (!key) continue;
+      readings[def.name] = row[key as keyof typeof row] ?? null;
+    }
+    return {
+      duty_date: row.dutyDate,
+      record_no: row.recordNo,
+      status: row.status,
+      submitted_at: row.submittedAt,
+      version: row.version,
+      readings,
+    };
+  }
+
   /**
    * 组装 12 张任务卡（F1-02）。
    *
@@ -214,20 +263,27 @@ export class RecordsService {
     spot: { id: number; name: string; sortNo: number },
     recordRow: Record<string, unknown> | undefined,
   ): CardDto {
+    // 动态必填的取值函数：从 records 行按字段名取值（未存列/无记录 → null）
+    const getValue: FieldValueGetter = (fieldName) => {
+      const key = recordKeyOf(fieldName, this.logger);
+      return key ? (recordRow?.[key] ?? null) : null;
+    };
+
     const fields: CardFieldStateDto[] = def.fields.map((name) => {
-      const key = recordKeyOf(name, this.logger);
-      const value = key ? (recordRow?.[key] ?? null) : null;
+      const value = getValue(name);
       return {
         name,
-        required: isCountableField(name),
-        filled: isFilled(value),
+        // 动态必填（TK-06）：条件必填按已填值触发（备注看状态是否 'bad'、锅炉三项看 boiler_run），
+        // 分母随之动态化——师傅填完该填的进度条即可到 100%（F1-03-T1）。判定函数与 h5 同源（shared cards.ts）。
+        required: isRequiredField(name, getValue),
+        filled: isFilledValue(value),
         abnormal: isAbnormal(name, value),
         value,
       };
     });
 
-    // 角标分母只数 required 字段：条件必填（hp_note / 停机置灰的温度 / 2 号罐读数等）不计入，
-    // 否则师傅填完该填的进度条也到不了 100%，违反 F1-03-T1「计数与实际一致」。详见 cards.ts CONDITIONAL_FIELDS。
+    // 角标分母只数 required 字段：未触发的条件必填（异常备注、停机时的锅炉三项）不计入，
+    // 否则师傅填完该填的进度条也到不了 100%，违反 F1-03-T1「计数与实际一致」。口径见 cards.ts isRequiredField。
     const countable = fields.filter((f) => f.required);
     const filled = countable.filter((f) => f.filled).length;
     const abnormal = fields.filter((f) => f.abnormal).length;

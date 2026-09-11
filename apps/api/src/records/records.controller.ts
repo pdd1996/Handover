@@ -1,5 +1,5 @@
 import { Controller, Get, UseGuards } from '@nestjs/common';
-import type { TodayDto } from '@handover/shared';
+import type { PrevDto, TodayDto } from '@handover/shared';
 import { CurrentUser, Roles } from '../auth/decorators';
 import { RolesGuard } from '../auth/roles.guard';
 import { SessionGuard } from '../auth/session.guard';
@@ -33,5 +33,23 @@ export class RecordsController {
   @Roles('master', 'chief')
   today(@CurrentUser() user: SessionUser): Promise<TodayDto> {
     return this.records.today(user);
+  }
+
+  /**
+   * GET /api/v1/records/today/prev —— 上一班读数带出（TK-07；F1-05、F1-15、DATA-02、F3-07）。
+   *
+   * 取数口径（服务端，D-T17）：按 C-08 班次日期取**相邻班次**（今日班次日期 − 1 天）的记录，
+   * 非 draft（已提交）才带出；相邻日无行（漏交）或为 draft → `prev: null` 且非首班
+   * （F3-07 缺失态，前端显 "—" 并允许补录），**不回落更早记录**；首班（今日之前无任何记录）
+   * → `first_day: true`（F1-15）。响应形状见 shared `dto.ts PrevDto`。
+   *
+   * 角色：契约 §3.2 角色列标 `master`，与 GET /records/today 同口径放宽到 `chief`
+   * （契约 §1「chief：全部 + 配置」覆盖师傅端只读接口；角色列回写见契约修订记录 5）。
+   */
+  @Get('today/prev')
+  @UseGuards(SessionGuard, RolesGuard)
+  @Roles('master', 'chief')
+  prev(): Promise<PrevDto> {
+    return this.records.prev();
   }
 }

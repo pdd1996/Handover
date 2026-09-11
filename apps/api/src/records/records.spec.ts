@@ -348,13 +348,14 @@ describe('F1-01/F1-02/F1-03 今日交接首页（TK-05）', () => {
   });
 
   describe('F1-03-T1：角标与顶部进度条实时汇总已填/待填/异常', () => {
-    it('分母黄金值 = 38（哨兵：改分母口径必须以可读失败强制人工核对规格）', () => {
+    it('分母黄金值 = 42（哨兵：改分母口径必须以可读失败强制人工核对规格）', () => {
       // 其余用例用 COUNTABLE_FIELD_TOTAL 与接口对照，属同一字典自证（同源盲区）；
       // 此处钉死字面量：若 cards.ts 的 fill 口径、CONDITIONAL/OPTIONAL 集合或卡片字段清单
-      // 变化导致分母漂移，本用例会爆，需人工比对台账 F1-03 与决策记录 D-T16 后再改数。
-      // 实算分解（12 卡）：water 1 + electricity 3 + gas 2 + lo_am 5 + lo_pm 2 + cylinder 9
-      //   + boiler 2 + cooling 2 + pump 10 + hvac 2 + elevator 0 + duty_desk 0 = 38
-      expect(COUNTABLE_FIELD_TOTAL).toBe(38);
+      // 变化导致分母漂移，本用例会爆，需人工比对台账 F1-03/DATA-01 与决策记录 D-T16 后再改数。
+      // 实算分解（12 卡）：water 1 + electricity 3 + gas 2 + lo_am 7 + lo_pm 4 + cylinder 9
+      //   + boiler 2 + cooling 2 + pump 10 + hvac 2 + elevator 0 + duty_desk 0 = 42
+      //   （TK-06：t2_* 四项按 DATA-01「两罐 8 项均必填」归位为 countable，38→42）
+      expect(COUNTABLE_FIELD_TOTAL).toBe(42);
     });
 
     it('当日无记录 → 全部待填：filled=0、pending=total、abnormal=0', async () => {
@@ -390,8 +391,8 @@ describe('F1-01/F1-02/F1-03 今日交接首页（TK-05）', () => {
       expect(waterCard?.fields.find((f) => f.name === 'water_use')?.required).toBe(false);
       expect(waterCard?.badge.total).toBe(1);
 
-      // 条件必填（hp_note 仅 hp_status=bad 时填，附录 A「异常时必填备注」）不计入分母，
-      // 但仍出现在字段清单里供 TK-06 渲染；TK-06 落地 F1-08 后转动态判定
+      // 条件必填（hp_note 仅 hp_status=bad 时填，附录 A「异常时必填备注」）未触发前不计入分母，
+      // 但仍出现在字段清单里供 TK-06 渲染；触发后计入（动态口径，见 cards.ts isRequiredField）
       const hpCard = body.cards.find((c) => c.key === 'electricity');
       expect(hpCard?.fields.find((f) => f.name === 'hp_note')?.required).toBe(false);
       expect(hpCard?.badge.total).toBe(3); // e1_reading、e2_reading、hp_status
@@ -449,8 +450,9 @@ describe('F1-01/F1-02/F1-03 今日交接首页（TK-05）', () => {
       expect(abnormalFields).toEqual(['hp_status']);
       // hp_status 选“异常”**同时命中两个独立维度**：它是 countable 字段故 filled+1，
       // 值为 bad 故 abnormal+1——“已填”与“异常”不是互斥状态，前端据此分别画进度与变色角标。
-      // hp_note 为条件必填：不计入分母，故填了它也不改 total。
-      expect(hpCard?.badge).toEqual({ filled: 1, total: 3, pending: 2, abnormal: 1 });
+      // hp_note 为条件必填：hp_status=bad 已触发 → 转入分母（total 3→4）且已填（filled 2）；
+      // TK-06 起分母为动态口径（cards.ts isRequiredField），未触发前不计入。
+      expect(hpCard?.badge).toEqual({ filled: 2, total: 4, pending: 2, abnormal: 1 });
 
       // 异常沿卡片→板块→进度条三级汇总（F1-03「实时汇总」）
       expect(body.sections.find((s) => s.no === 2)?.badge.abnormal).toBe(1);

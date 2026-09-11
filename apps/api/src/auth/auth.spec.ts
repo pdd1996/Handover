@@ -15,7 +15,7 @@ import { createHash } from 'node:crypto';
 import type { Server } from 'node:http';
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
-import { eq, gt, inArray } from 'drizzle-orm';
+import { desc, eq, gt, inArray } from 'drizzle-orm';
 import request from 'supertest';
 import { AppModule } from '../app.module';
 import { configureApp } from '../app.setup';
@@ -128,8 +128,14 @@ describe('F1-11 账号密码登录（TK-04）', () => {
     const me = await request(server).get(`${API}/me`).set('Cookie', setCookie).expect(200);
     expect(me.body).toEqual(res.body.user);
 
-    // 契约 §5：登录写审计（action=login，含设备与 IP；C-04 全程留痕）
-    const audits = await db.select().from(auditLogs).where(eq(auditLogs.action, 'login'));
+    // 契约 §5：登录写审计（action=login，含设备与 IP；C-04 全程留痕）。
+    // 取**本人最新一条**成功登录：audit_logs 全库累积（E2E 真实登录也写 zhang 的行），
+    // find 首条会被历史行污染（TK-06 跑 E2E 后暴露），故按 id 倒序取本断言自己产生的那条。
+    const audits = await db
+      .select()
+      .from(auditLogs)
+      .where(eq(auditLogs.action, 'login'))
+      .orderBy(desc(auditLogs.id));
     const mine = audits.find((a) => a.reason === '登录成功' && a.actorId === rows[0]?.userId);
     expect(mine).toBeDefined();
     expect(mine?.device).toBe(userAgent); // User-Agent 记入 device 列（C-05）
