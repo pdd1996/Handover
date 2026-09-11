@@ -13,7 +13,7 @@
  */
 import { computed, onMounted, ref } from 'vue';
 import { showToast } from 'vant';
-import type { TodayDto } from '@handover/shared';
+import type { PrevDto, TodayDto } from '@handover/shared';
 import { ApiRequestError, api, type AuthUser } from './api/client';
 import TodayView from './views/TodayView.vue';
 import SectionView from './views/SectionView.vue';
@@ -39,39 +39,87 @@ const activeCard = computed(
 const isDev = import.meta.env.DEV;
 
 /**
+ * 上一班带出（TK-07，m1/m2 已随 TK-08 收敛到本组件）：**App 级按 duty_date 缓存**——
+ * 同班次内开任意卡复用同一份响应（原实现在 SectionView 每开一卡重复拉取），
+ * 跨班次（duty_date 变化）由 loadPrev 自动重取。
+ */
+const prevInfo = ref<PrevDto | null>(null);
+const prevCache = ref<{ dutyDate: string; dto: PrevDto } | null>(null);
+
+/**
  * 登录态清理**单一入口**（TK-06 评审遗漏一，二次评审订正）：**已建立登录态后的失效**——
- * 被动掉线（notify 的 401 分支：会话过期/账号被停用）与主动登出（onLogout）、以及启动恢复
- * 失败（bootstrap 的静默 catch）都必须走这里；清空项新增/删减只改本函数，不得在分支里
- * 各写一份。边界：**登录请求自身的 401（F1-11-T2/T3 密码错/停用）不走这里**——此刻本无
- * 会话与草稿可言，且 TK-08 起草稿落 IndexedDB，误清会丢用户本机草稿（违反 F1-09 续填）。
- * 本函数只清会话内内存草稿；持久化草稿按用户/记录 keying，由其自身生命周期管理（TK-08）。
+ * 被动掉线（handleSessionLoss 的 401 分支：会话过期/账号被停用）与主动登出（onLogout）、
+ * 以及启动恢复失败（bootstrap 的静默 catch）都必须走这里；清空项新增/删减只改本函数，
+ * 不得在分支里各写一份。边界：**登录请求自身的 401（F1-11-T2/T3 密码错/停用）不走这里**——
+ * 此刻本无会话可言，误清会丢用户本机草稿（违反 F1-09 续填，D-T18 修订 #9）。
+ * 清空范围：**仅会话内内存草稿**——持久草稿按 D-T18 修订 #9 保留至该班次出现已提交记录
+ * （登出/会话失效不删本机草稿：弱信号点位长时间填写不因掉线丢整班数据，PRD §7 双保险；
+ * 串值防护由用户+班次 keying 承担，C-05）；带出数据与 duty_date 缓存一并清。
  */
 function resetSession(): void {
   user.value = null;
   today.value = null;
   activeCardKey.value = null;
-  draft.clear();
+  prevInfo.value = null;
+  prevCache.value = null;
+  draft.clearMemory();
 }
 
-/** 错误提示：业务错误用服务端文案（C-09 禁止模糊提示），网络错误用本地文案 */
-function notify(err: unknown): void {
-  const message = err instanceof Error ? err.message : '操作失败，请重试';
+/**
+ * 已建立登录态后的 401 → 会话失效（会话过期/已登出/账号被停用，契约 §3.1 鉴权失败统一 401）
+ * → resetSession 单一入口。返回是否发生了清理，供调用方决定降级方式。
+ * TK-07 评审 m2：/prev 拉取的 401 原先在 SectionView 被静默吞掉，现与本判断汇流（不再各写一份）。
+ */
+function handleSessionLoss(err: unknown): boolean {
   if (
     err instanceof ApiRequestError &&
     err.status === 401 &&
     user.value !== null // 仅已登录态下的被动掉线；登录请求自身的 401 不得清草稿（见 resetSession 注）
   ) {
-    // 会话过期/已登出/账号被停用 → 回登录页（契约 §3.1 鉴权失败统一 401）；
-    // 草稿随登录态一并清空（resetSession 单一入口，换账号不得串值）
     resetSession();
+    return true;
   }
+  return false;
+}
+
+/** 错误提示：业务错误用服务端文案（C-09 禁止模糊提示），网络错误用本地文案 */
+function notify(err: unknown): void {
+  handleSessionLoss(err);
+  const message = err instanceof Error ? err.message : '操作失败，请重试';
   showToast(message);
+}
+
+/**
+ * 上一班带出拉取（TK-07 评审 m1/m2）：按 duty_date 缓存，同班次只拉一次；401 并入
+ * handleSessionLoss 单一入口；其余失败（网络/离线，TK-15 接管）静默降级为「无比对值」——
+ * 带出是只读辅助信息，不弹错、不阻塞填写。
+ */
+async function loadPrev(): Promise<void> {
+  const dutyDate = today.value?.duty_date;
+  if (!dutyDate) return;
+  if (prevCache.value?.dutyDate === dutyDate) {
+    prevInfo.value = prevCache.value.dto;
+    return;
+  }
+  try {
+    const dto = await api.prev();
+    prevCache.value = { dutyDate, dto };
+    prevInfo.value = dto;
+  } catch (err) {
+    if (!handleSessionLoss(err)) prevInfo.value = null;
+  }
 }
 
 async function loadToday(): Promise<void> {
   loadingToday.value = true;
   try {
     today.value = await api.today();
+    void loadPrev();
+    // F1-09 续填入口：登录态 + 班次键就绪后恢复持久草稿；恢复了有内容的草稿则给
+    // 「草稿恢复提示」（PRD §6.1 设计触点）。restore 同键幂等（backToToday 重复调用不重灌）
+    if (user.value && (await draft.restore(user.value.id, today.value.duty_date))) {
+      showToast('已恢复本班次未提交的草稿');
+    }
   } catch (err) {
     notify(err);
   } finally {
@@ -84,9 +132,8 @@ async function bootstrap(): Promise<void> {
     user.value = await api.me(); // Cookie 仍有效则直接进首页
     await loadToday();
   } catch {
-    // 未登录或会话过期，静默回登录页（不必弹错）；
-    // 草稿随登录态一并清（resetSession 单一入口——刷新后内存草稿本已为空，
-    // 此守卫是为 TK-08 持久化草稿预落：Cookie 过期路径不清则换人登录串值）
+    // 未登录或会话过期，静默回登录页（不必弹错）；草稿随登录态一并清内存（resetSession 单一入口）。
+    // 持久草稿不动（D-T18 修订 #9）：按用户+班次 keying，只可能被同一人同班次恢复，无串值风险（C-05）
     resetSession();
   } finally {
     booting.value = false;
@@ -119,7 +166,9 @@ async function onLogout(): Promise<void> {
   } catch {
     // 登出失败也清本地态：会话存根可能已失效，卡在页面反而更糟
   }
-  resetSession(); // 草稿属登录会话（TK-06），换账号不得串值
+  // 本人登出：仅清会话内内存（持久草稿保留至该班次提交成功，D-T18 修订 #9）；
+  // 换账号不得串值由 keying 保证（C-05）
+  resetSession();
 }
 
 /** 打开板块填写页（F1-02-T2） */
@@ -192,7 +241,12 @@ onMounted(bootstrap);
   </div>
 
   <!-- 板块填写页（F1-02-T2） -->
-  <SectionView v-else-if="activeCard" :card="activeCard" @back="backToToday" />
+  <SectionView
+    v-else-if="activeCard"
+    :card="activeCard"
+    :prev-info="prevInfo"
+    @back="backToToday"
+  />
 
   <!-- 今日交接首页（F1-01 / F1-02 / F1-03） -->
   <template v-else>

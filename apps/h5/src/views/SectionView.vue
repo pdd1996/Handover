@@ -10,16 +10,19 @@
  *   校验同一引擎）→ 有违规则展示逐条点名清单（label + 板块），点击清单项滚动到目标字段——
  *   DOM id 用 shared `fieldAnchor` 同一函数生成（`sec-{板块号}-{字段 kebab}`），锚点两端同源。
  * - **数值暂存**：值写入本地草稿 store（store/draft.ts），返回首页由 TodayView 合并重算角标；
- *   服务端持久化留 TK-08（PUT draft）/TK-15（离线队列）。
+ *   TK-08 起约 2 秒自动保存到 IndexedDB（按用户+班次 keying），关闭页面重开可续填（F1-09）；
+ *   离线待同步队列留 TK-15。
  *
- * - **上一班读数带出**（TK-07）：进入本卡时拉取 GET /records/today/prev，师傅亲手填/选的
- *   读数字段逐项显示上一班比对值（液氧 8:30 卡取上一班记录的 20:30 字段，映射用 shared
- *   `prevSourceField`，DATA-02）；首班显「首班记录」提示（F1-15）、上一班缺失显缺失提示（F3-07）。
+ * - **上一班读数带出**（TK-07）：上一班比对值由 App 级拉取并按 duty_date 缓存后经 prop 下发
+ *   （TK-07 评审 m1/m2 随 TK-08 收敛：不再每开一卡重复拉取，401 由 App 级 handleSessionLoss
+ *   并入 resetSession 单一入口），师傅亲手填/选的读数字段逐项显示上一班比对值（液氧 8:30 卡
+ *   取上一班记录的 20:30 字段，映射用 shared `prevSourceField`，DATA-02）；首班显「首班记录」
+ *   提示（F1-15）、上一班缺失显缺失提示（F3-07）。
  *
  * 选项来源边界：`boiler_no` / `hvac_locs` 的候选清单读 configs（TK-11 配置只读端点），
  * 本阶段用《开发种子数据》占位值渲染并在常量处标注 ❓，接入后仅换数据源、结构不变。
  */
-import { computed, onMounted, ref } from 'vue';
+import { computed, ref } from 'vue';
 import { showToast } from 'vant';
 import {
   FIELD_BY_NAME,
@@ -34,13 +37,15 @@ import {
   type PrevDto,
   type RecordFieldName,
 } from '@handover/shared';
-import { api } from '../api/client';
 import { useDraft } from '../store/draft';
 
-const props = defineProps<{ card: CardDto }>();
+const props = defineProps<{ card: CardDto; prevInfo: PrevDto | null }>();
 const emit = defineEmits<{ (e: 'back'): void }>();
 
 const draft = useDraft();
+
+/** 「草稿已自动保存」指示（F1-09）：本次页面会话内已有至少一次成功落盘，兼作 E2E 同步点 */
+const draftSaved = computed(() => draft.lastSavedAt.value > 0);
 
 /** 填写方式的中文说明（附录 A「填写方式」列） */
 const FILL_LABEL: Record<string, string> = {
@@ -50,7 +55,7 @@ const FILL_LABEL: Record<string, string> = {
   auto_editable: '自动可改',
 };
 
-/** 服务端已知值（GET /records/today 的 fields[].value；本阶段恒 null，TK-08 起有真值） */
+/** 服务端已知值（GET /records/today 的 fields[].value；提交前恒 null——草稿在客户端本机，D-T18） */
 function serverValue(name: RecordFieldName): unknown {
   return props.card.fields.find((f) => f.name === name)?.value ?? null;
 }
@@ -116,27 +121,17 @@ const MULTI_OPTIONS: Partial<Record<RecordFieldName, readonly string[]>> = {
 
 // ── 上一班读数带出（TK-07，F1-05 / F1-15 / F3-07 / DATA-02）────────────────────
 
-/** GET /records/today/prev 响应；null = 尚未取到（加载中/失败，不阻塞填写） */
-const prevInfo = ref<PrevDto | null>(null);
-
-onMounted(() => {
-  // 带出是辅助信息：拉取失败（含离线，TK-15 接管）静默降级为「不显示比对值」，不弹错。
-  // 挂账 TK-08（TK-07 评审 m1/m2）：401 应回抛走 App.vue resetSession 单一入口、
-  // prev 数据源提升到 App 级按 duty_date 缓存（当前每开一卡重复拉取）；随在线草稿层一并收敛
-  api
-    .prev()
-    .then((dto) => (prevInfo.value = dto))
-    .catch(() => (prevInfo.value = null));
-});
+// 数据源为 App 级按 duty_date 缓存的拉取结果（prop 下发，见 App.vue loadPrev 与头部说明）；
+// null = 尚未取到（加载中/失败，不阻塞填写）
 
 /** 上一班比对读数（无上一班记录或未取到时为 null） */
 const prevReadings = computed<Readonly<Record<string, unknown>> | null>(
-  () => prevInfo.value?.prev?.readings ?? null,
+  () => props.prevInfo?.prev?.readings ?? null,
 );
 
 /** 首班/缺失提示（F1-15 / F3-07）；null = 有上一班记录或尚未取到 */
 const prevBanner = computed<{ tone: 'warn' | 'info'; text: string } | null>(() => {
-  const info = prevInfo.value;
+  const info = props.prevInfo;
   if (!info) return null;
   if (info.first_day) {
     // F1-15-T1 判据文案「首班记录，无上一班数据可比对」
@@ -483,8 +478,12 @@ const headerTitle = computed(() =>
       </div>
 
       <div class="mx-4 mt-3 text-xs leading-relaxed text-slate-400">
-        填写内容暂存本机（会话内），返回首页后角标实时更新；在线草稿保存见 TK-08，离线暂存见
-        TK-15。提交前的汇总预览见 TK-12。
+        填写内容自动暂存本机，稍候即自动保存，关闭页面重开可续填（F1-09）；离线暂存见 TK-15，
+        提交前的汇总预览见 TK-12。
+        <!-- 「已自动保存」指示（F1-09）：本次页面会话内至少一次成功落盘，兼作 E2E 同步点 -->
+        <span v-if="draftSaved" data-testid="draft-saved" class="block font-bold text-emerald-600">
+          草稿已自动保存
+        </span>
       </div>
     </template>
 

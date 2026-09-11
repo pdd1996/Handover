@@ -29,7 +29,7 @@ defineEmits<{ (e: 'open', key: string): void }>();
 
 const { getValue: getDraft } = useDraft();
 
-/** 服务端已知值（fields[].value；本阶段无写入接口恒 null，TK-08 起有真值） */
+/** 服务端已知值（fields[].value；提交前恒 null——草稿在客户端本机，D-T18；提交后 TK-12 起有真值） */
 const serverValues = computed(() => {
   const map = new Map<string, unknown>();
   for (const card of props.today.cards) {
@@ -109,8 +109,9 @@ const recordText = computed(() =>
 
 /**
  * 同步状态。**TK-05 阶段恒显示「已同步」**：接口的 `pending_sync` 是占位 false
- * （离线待同步队列存于本机 IndexedDB，服务器零感知——F1-07-T2），真值待 TK-08 草稿层 /
- * TK-15 离线三层缓冲落地后由本地队列 OR 合并。此处保留 UI 位以免后续改布局。
+ * （离线待同步队列存于本机 IndexedDB，服务器零感知——F1-07-T2），真值待 TK-15 离线三层缓冲
+ * 落地后由本地待同步队列 OR 合并（草稿层不产生待同步语义，见决策记录 D-T18）。
+ * 此处保留 UI 位以免后续改布局。
  */
 const syncText = computed(() => (props.today.pending_sync ? '待同步' : '已同步'));
 </script>
