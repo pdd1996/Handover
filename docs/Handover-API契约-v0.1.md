@@ -126,6 +126,12 @@
 | GET `/admin/alerts` | chief | 预警中心 | F4-01（P2 ⏸） | Phase 2 启用时细化 |
 | GET `/admin/stats/trends` | chief | 趋势曲线数据 | F5-02（P2 ⏸） | Phase 2 启用时细化 |
 
+### 3.7 配置只读（师傅端表单候选）
+
+| 方法与路径 | 角色 | 用途 | 关联规格 | 契约要点 |
+| --- | --- | --- | --- | --- |
+| GET `/configs` | master,chief | 表单选项类配置白名单 | DATA-07 | **只读视图**：返回 `{ {配置键}: [候选...] }`（键集见 shared `FORM_OPTION_CONFIG_KEYS`，现 `hvac_locs` / `boiler_list` 两键，新增键须同步 shared 常量与本节），值为 configs.config_value 的 JSON 数组解析结果，非法/键缺失回落空数组；**非白名单运营键不出网**（读取归 §3.6 GET `/admin/configs`）；角色列 `chief` 依据 §1「科长：全部 + 配置」（与订正 4/5 同口径）；**提交侧不校验候选成员性**（h5 离线降级用占位候选，成员性校验会把降级路径变 400，违反 F1-09/C-01；如需引入随 TK-27 配置中心评估）。响应形状权威定义 `@handover/shared` dto `FormOptionsDto`（显式键映射，订正 10） |
+
 ## 4. 提交协议（POST `/records/today/submit`）
 
 请求体要点：
@@ -182,3 +188,5 @@
 6. **v0.1 订正（2026-09-11）**：TK-07 评审修复轮——§3.2 `GET /records/today/prev` 契约要点列精确化：原文「无则返回 `first_day: true`」中的「无」实际有**两种语义**（首班 / 上一班缺失），且取数口径按决策记录 **D-T17** 定案为**相邻班次**（duty_date = 今日班次日期 − 1 天）+ 非 draft 资格；相邻日无行（漏交，F6-06 检测的场景）或该行为 draft → `prev: null` 且非首班（缺失态），**不回落更早记录**（订正 5 的「紧邻前一条」按「过滤已提交后取最近一条」直读会在漏交日回落，与台账 F1-05-T2 判据「昨日无已提交记录 → 无带出值」冲突，定案以判据为准）。响应形状不变（权威形状 `@handover/shared` dto `PrevDto`）。
 7. **v0.1 订正（2026-09-11）**：TK-08（草稿自动保存与续填）落地联动——§3.2 `GET/PUT /records/today/draft` 两行按决策记录 **D-T18** 标注**暂缓实现**：Phase 1 草稿层为客户端 IndexedDB（技术方案 §5.1 草稿层、D-T10 离线三层缓冲；键按用户与班次，tombstone 语义——清除只随本人登出/本人会话失效、登录 401 不清本机草稿——详见 D-T18），服务端不设在线草稿读写端点；records 行提交时一次性创建（record_no 生成时机不变，§4 第 5 步），draft 状态仅由撤回（F2-08，TK-21）产生。F1-09 判据用例为 E2E 层 `tests/e2e/tests/draft-persist.spec.ts`（F1-09-T1：关闭页面重开草稿恢复可续填）。
 8. **v0.1 订正（2026-09-11）**：TK-09（液氧板块专项）落地联动——§4 补充 `lo_measured_am/pm` 的数据来源口径：由客户端填写液氧读数时自动记录（本机时刻，随 IndexedDB 草稿持久化即离线本地时间戳，映射与格式见 shared `cards.ts measuredAtTarget` / `calc.ts localMeasuredAt`），随 payload 上送、服务端原样落库，**不得以同步/接收时刻覆盖**（DATA-13-T2 判据；D-P12「读数自动记录实际测量时刻，名义时段仅用于卡片组织」），并与第 3 步用量列（服务端计算、不信任客户端传值）明确分源。接口层用例 DATA-13-T1/T2 的服务端「不覆盖」复验挂 TK-12 supertest（客户端半边已由 TK-09 落地：E2E `lo-tank.spec.ts` + 单元哨兵 `records-lo.spec.ts`）。
+9. **v0.1 订正（2026-09-12）**：TK-11（新风多选）落地联动——§3 新增 **3.7 配置只读**：GET `/configs`（master,chief）为师傅端表单候选渲染提供 configs 表的**表单选项白名单只读视图**（现 `hvac_locs` / `boiler_list` 两键；非白名单运营键不出网，其读取归 §3.6 GET `/admin/configs`），值为 config_value 的 JSON 数组解析结果、非法回落空数组；角色列含 `chief` 依据 §1「科长：全部 + 配置」，与订正 4/5 同口径。响应形状权威定义 `@handover/shared` dto `FormOptionsDto`（api 产出、h5 消费同一份）。Phase 1 路由 32 → 33 条（订正 2 所述错误码表 13 项不变）。接口层用例 DATA-07-T1 的「候选与 configs 同步」半边已在 apps/api `configs.spec.ts` 落地；「多选保存 → 数组落库」依赖提交端点，复验挂 TK-12 supertest（§3.2 POST `/records/today/submit` 契约不变）。
+10. **v0.1 订正（2026-09-12）**：TK-11 评审修复轮——① §3.7 契约要点补明：**提交侧不校验 `hvac_locs` / `boiler_list` 的候选成员性**（服务端仅做 JSON 数组解析回传；h5 离线/端点不可达时以《开发种子数据》占位候选降级渲染，若提交校验按候选成员性拦截会把降级路径变成 400，违反 F1-09 续填与 C-01；成员性校验如确需引入，随 TK-27 配置中心一并评估并回改本表）。② 响应形状由开放索引签名收窄为**显式键映射**（键集单一来源 shared `FORM_OPTION_CONFIG_KEYS`，拼错键名编译期即报），权威形状仍 `@handover/shared` dto `FormOptionsDto`。
