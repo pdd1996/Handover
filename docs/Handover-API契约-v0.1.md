@@ -77,8 +77,8 @@
 | --- | --- | --- | --- | --- |
 | GET `/records/today` | master,chief | 首页卡片汇总 | F1-01、F1-02、F1-03 | 返回各板块填写状态、角标统计、今日记录状态、待同步标记 |
 | GET `/records/today/prev` | master,chief | 上一班读数带出 | F1-05、DATA-02 | 按 duty_date 取**相邻班次**（今日班次日期 − 1 天，D-T17）**已提交**记录；含液氧昨日 20:30 值；相邻日无行（漏交）或为 draft → `prev: null` 且非首班（F3-07 缺失态）；今日之前无任何记录 → `first_day: true`（F1-15）；**不回落更早记录** |
-| GET `/records/today/draft` | master | 读取在线草稿 | F1-09 | 服务端 draft 暂存（离线草稿在客户端，不经此接口） |
-| PUT `/records/today/draft` | master | 保存草稿（局部） | F1-09 | 不做业务校验，仅结构与范围检查 |
+| GET `/records/today/draft` | master | 读取在线草稿 | F1-09 | **暂缓实现（D-T18）**：草稿层为客户端 IndexedDB（技术方案 §5.1），服务端不设在线草稿读写；跨设备续填需求出现时再评估恢复本路由 |
+| PUT `/records/today/draft` | master | 保存草稿（局部） | F1-09 | **暂缓实现（D-T18）**：同上；records 行提交时一次性创建，draft 状态仅由撤回（F2-08，TK-21）产生 |
 | POST `/records/today/preview` | master | 提交前预览 | F1-10 | 返回未填项清单与异常项清单（结构同 `missing_fields`） |
 | POST `/records/today/submit` | master | 正式提交 | F1-01、F1-07、F2-01、DATA-09、DATA-10 | 详见 §4 提交协议 |
 | POST `/records/today/withdraw` | master | 撤回 | F2-08、F2-09、F2-10 | 服务端校验三条件；失败 409 WITHDRAW_NOT_ALLOWED；成功回可编辑并留痕 |
@@ -178,3 +178,4 @@
 4. **v0.1 订正（2026-09-09）**：TK-05 实现评审跟进——§3.2 `GET /records/today` 角色列由 `master` 回写为 `master,chief`：实现已按 §1「chief（科长：全部 + 配置）」口径放行科长只读访问（`records.spec.ts` 固化用例钉死），原格子仅写 master 属文档遗漏，不另立守卫规则；§3.2 其余路由角色列不变（写入/提交链路是否覆盖 chief 待各任务落地时按同一口径回写）。
 5. **v0.1 订正（2026-09-10）**：TK-07（上一班读数带出）落地联动——§3.2 `GET /records/today/prev` 角色列由 `master` 回写为 `master,chief`，与订正 4 同一口径（§1「chief：全部 + 配置」覆盖师傅端**只读**接口；`records-prev.spec.ts` 固化用例钉死）。另补明响应语义（实现侧已按此落地，`@handover/shared` dto 模块 `PrevDto` 为权威形状）：① 按班次日期取**紧邻前一条**记录，非 draft（已提交/异议/完成）才带出，**不跳班次回落更早记录**——前一条为 draft 时返回 `prev: null` 且非首班（F3-07 缺失态，前端显"—"并允许补录，复验挂任务分解 TK-14）；② 今日之前无任何记录 → `first_day: true`（F1-15 首班）；③ 液氧 8:30 卡的带出源为上一班记录的 2030 字段（DATA-02「取昨日记录 20:30（非今日）」，映射见 shared `cards.ts prevSourceField`，服务端原样回传 readings、映射由前端消费）。
 6. **v0.1 订正（2026-09-11）**：TK-07 评审修复轮——§3.2 `GET /records/today/prev` 契约要点列精确化：原文「无则返回 `first_day: true`」中的「无」实际有**两种语义**（首班 / 上一班缺失），且取数口径按决策记录 **D-T17** 定案为**相邻班次**（duty_date = 今日班次日期 − 1 天）+ 非 draft 资格；相邻日无行（漏交，F6-06 检测的场景）或该行为 draft → `prev: null` 且非首班（缺失态），**不回落更早记录**（订正 5 的「紧邻前一条」按「过滤已提交后取最近一条」直读会在漏交日回落，与台账 F1-05-T2 判据「昨日无已提交记录 → 无带出值」冲突，定案以判据为准）。响应形状不变（权威形状 `@handover/shared` dto `PrevDto`）。
+7. **v0.1 订正（2026-09-11）**：TK-08（草稿自动保存与续填）落地联动——§3.2 `GET/PUT /records/today/draft` 两行按决策记录 **D-T18** 标注**暂缓实现**：Phase 1 草稿层为客户端 IndexedDB（技术方案 §5.1 草稿层、D-T10 离线三层缓冲；键按用户与班次，tombstone 语义——清除只随本人登出/本人会话失效、登录 401 不清本机草稿——详见 D-T18），服务端不设在线草稿读写端点；records 行提交时一次性创建（record_no 生成时机不变，§4 第 5 步），draft 状态仅由撤回（F2-08，TK-21）产生。F1-09 判据用例为 E2E 层 `tests/e2e/tests/draft-persist.spec.ts`（F1-09-T1：关闭页面重开草稿恢复可续填）。

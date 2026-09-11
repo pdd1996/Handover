@@ -31,7 +31,7 @@
 | EVT-03 | `record_submitted` | 提交请求返回成功 | `{ client_ts, from_offline }` | 与 records.submitted_at 交叉核对 |
 | EVT-04 | `sync_queued` | 离线状态下点击提交、单据入本地队列 | `{ client_ts, queue_depth }` | F1-07 离线口径 |
 | EVT-05 | `sync_result` | 待同步队列每单上传结束 | `{ result: succeeded/failed, latency, queue_depth }` | 同步成功率分子分母 |
-| EVT-06 | `draft_abandoned` | 客户端检测到**昨日**存在未提交草稿且当日未再编辑 | `{ duty_date, last_edit_ts }` | 上报仅用于度量；本地草稿保留至该班次有已提交记录 |
+| EVT-06 | `draft_abandoned` | 客户端检测到**昨日**存在未提交草稿且当日未再编辑 | `{ duty_date, last_edit_ts }` | 上报仅用于度量；本地草稿保留至该班次有已提交记录（TK-08 起已按此实现，清除时点见 D-T18 修订 #9；`last_edit_ts` 随草稿体补字段，挂 TK-30） |
 
 **上报机制**：事件本地缓存、批量上报（页面心跳与网络恢复时），失败重试，不阻塞业务操作；离线期间事件的 `client_ts` 保留发生时刻（与 DATA-13 同口径）。
 
@@ -68,3 +68,4 @@ CREATE TABLE telemetry_events (
 ## 修订记录
 
 1. **v0.1（2026-09-01）**：初稿。定义 8 项指标的可计算口径（3 项纯推导、3 项埋点、2 项 P2 推导）、6 个埋点事件（EVT-01～06）、telemetry_events 表结构建议与上报机制；明确与 audit_logs 的职责分离；列出采纳时的三处上游回写。
+2. **v0.1 增补（2026-09-11）**：TK-08（草稿层）落地后对 **EVT-06** 补实现状态批注——「本地草稿保留至该班次有已提交记录」已由客户端兑现（决策记录 D-T18 修订 #9：清除时点 = 提交成功，登出/会话失效只清内存），TK-30 落地时草稿体需补 `last_edit_ts` 字段。口径本身不变，不升版本号。
