@@ -9,9 +9,17 @@
  * 到点卡（液氧 8:30 / 20:30）在左块显示时段、标题加「（早）/（晚）」后缀。
  */
 import { computed } from 'vue';
-import type { CardDto } from '@handover/shared';
+import type { BadgeDto, CardDto } from '@handover/shared';
 
-const props = defineProps<{ card: CardDto }>();
+/**
+ * badge / anyFilled（可选，TK-06）：首页传入的**实时角标**（含本地草稿的合并口径，
+ * shared computeCardBadge 计算）与「有无任意字段已填」；不传则回退接口给的静态值。
+ */
+const props = defineProps<{
+  card: CardDto;
+  badge?: BadgeDto;
+  anyFilled?: boolean;
+}>();
 defineEmits<{ (e: 'open', key: string): void }>();
 
 /** 中文序号（板块号 → 一~十）；到点卡改显时段，故不会用到板块四之外的重复字 */
@@ -36,14 +44,14 @@ const title = computed(() => {
  * 「已填」与「异常」不互斥：状态字段选"异常"时 filled 与 abnormal 同时 +1，此处以异常覆盖显示。
  */
 const badge = computed<{ text: string; tone: 'bad' | 'done' | 'todo' }>(() => {
-  const b = props.card.badge;
+  const b = props.badge ?? props.card.badge;
   if (b.abnormal > 0) return { text: `异常 ${b.abnormal}`, tone: 'bad' };
   if (b.total > 0)
     return b.pending === 0
       ? { text: '已填', tone: 'done' }
       : { text: `待填 ${b.pending}`, tone: 'todo' };
   // total=0：该卡无"应填"项——电梯卡走逐台核对（TK-17）、值班室卡两项均为选填
-  const anyFilled = props.card.fields.some((f) => f.filled);
+  const anyFilled = props.anyFilled ?? props.card.fields.some((f) => f.filled);
   if (anyFilled) return { text: '已填', tone: 'done' };
   return { text: props.card.kind === 'elevator' ? '待核对' : '选填', tone: 'todo' };
 });
@@ -52,7 +60,8 @@ const subtitle = computed(() => {
   const parts: string[] = [props.card.section_label];
   if (props.card.slot_label) parts.push('到点任务');
   if (props.card.kind === 'elevator') parts.push('逐台核对');
-  else if (props.card.badge.total > 0) parts.push(`${props.card.badge.total} 项`);
+  else if ((props.badge ?? props.card.badge).total > 0)
+    parts.push(`${(props.badge ?? props.card.badge).total} 项`);
   else parts.push('可留空');
   return parts.join(' · ');
 });

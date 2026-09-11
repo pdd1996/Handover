@@ -17,6 +17,9 @@ import type { TodayDto } from '@handover/shared';
 import { ApiRequestError, api, type AuthUser } from './api/client';
 import TodayView from './views/TodayView.vue';
 import SectionView from './views/SectionView.vue';
+import { useDraft } from './store/draft';
+
+const draft = useDraft();
 
 const user = ref<AuthUser | null>(null);
 const today = ref<TodayDto | null>(null);
@@ -35,13 +38,32 @@ const activeCard = computed(
 /** 开发构建标记（Vite 标准）：生产构建不含种子账号提示，避免泄露开发凭据线索 */
 const isDev = import.meta.env.DEV;
 
+/**
+ * 登录态清理**单一入口**（TK-06 评审遗漏一，二次评审订正）：**已建立登录态后的失效**——
+ * 被动掉线（notify 的 401 分支：会话过期/账号被停用）与主动登出（onLogout）、以及启动恢复
+ * 失败（bootstrap 的静默 catch）都必须走这里；清空项新增/删减只改本函数，不得在分支里
+ * 各写一份。边界：**登录请求自身的 401（F1-11-T2/T3 密码错/停用）不走这里**——此刻本无
+ * 会话与草稿可言，且 TK-08 起草稿落 IndexedDB，误清会丢用户本机草稿（违反 F1-09 续填）。
+ * 本函数只清会话内内存草稿；持久化草稿按用户/记录 keying，由其自身生命周期管理（TK-08）。
+ */
+function resetSession(): void {
+  user.value = null;
+  today.value = null;
+  activeCardKey.value = null;
+  draft.clear();
+}
+
 /** 错误提示：业务错误用服务端文案（C-09 禁止模糊提示），网络错误用本地文案 */
 function notify(err: unknown): void {
   const message = err instanceof Error ? err.message : '操作失败，请重试';
-  if (err instanceof ApiRequestError && err.status === 401) {
-    // 会话过期/已登出/账号被停用 → 回登录页（契约 §3.1 鉴权失败统一 401）
-    user.value = null;
-    today.value = null;
+  if (
+    err instanceof ApiRequestError &&
+    err.status === 401 &&
+    user.value !== null // 仅已登录态下的被动掉线；登录请求自身的 401 不得清草稿（见 resetSession 注）
+  ) {
+    // 会话过期/已登出/账号被停用 → 回登录页（契约 §3.1 鉴权失败统一 401）；
+    // 草稿随登录态一并清空（resetSession 单一入口，换账号不得串值）
+    resetSession();
   }
   showToast(message);
 }
@@ -62,7 +84,10 @@ async function bootstrap(): Promise<void> {
     user.value = await api.me(); // Cookie 仍有效则直接进首页
     await loadToday();
   } catch {
-    user.value = null; // 未登录或会话过期，静默回登录页（不必弹错）
+    // 未登录或会话过期，静默回登录页（不必弹错）；
+    // 草稿随登录态一并清（resetSession 单一入口——刷新后内存草稿本已为空，
+    // 此守卫是为 TK-08 持久化草稿预落：Cookie 过期路径不清则换人登录串值）
+    resetSession();
   } finally {
     booting.value = false;
   }
@@ -94,9 +119,7 @@ async function onLogout(): Promise<void> {
   } catch {
     // 登出失败也清本地态：会话存根可能已失效，卡在页面反而更糟
   }
-  user.value = null;
-  today.value = null;
-  activeCardKey.value = null;
+  resetSession(); // 草稿属登录会话（TK-06），换账号不得串值
 }
 
 /** 打开板块填写页（F1-02-T2） */

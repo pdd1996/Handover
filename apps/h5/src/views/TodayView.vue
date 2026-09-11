@@ -6,14 +6,74 @@
  * - F1-01「24 小时班一天一条记录，首页即今日交接」：页面唯一入口，班次日期取接口 `duty_date`（C-08）
  * - F1-02「12 张任务卡按巡检点位/时段组织，液氧拆 8:30/20:30 两张到点卡」：卡片与顺序**完全由接口给**
  *   （接口又以 spots 表驱动），前端不自行拼装、不排序，避免两端各说一套
- * - F1-03「卡片角标与顶部进度条实时汇总已填/待填/异常」：进度条与各卡角标同源于接口 `progress` / `badge`
+ * - F1-03「卡片角标与顶部进度条实时汇总已填/待填/异常」：**TK-06 起改为客户端实时计算**——
+ *   用 shared `computeCardBadge`（与 api 同一函数）对「本地草稿 ?? 服务端值」合并取值重算，
+ *   填写后返回首页角标/进度条立即反映，无需重新拉接口；字段值无草稿时结果与接口响应一致
  */
 import { computed } from 'vue';
-import type { TodayDto } from '@handover/shared';
+import {
+  CARD_BY_KEY,
+  computeCardBadge,
+  isFilledValue,
+  type BadgeDto,
+  type CardDto,
+  type CardKey,
+  type FieldValueGetter,
+  type TodayDto,
+} from '@handover/shared';
 import TaskCard from '../components/TaskCard.vue';
+import { useDraft } from '../store/draft';
 
 const props = defineProps<{ today: TodayDto }>();
 defineEmits<{ (e: 'open', key: string): void }>();
+
+const { getValue: getDraft } = useDraft();
+
+/** 服务端已知值（fields[].value；本阶段无写入接口恒 null，TK-08 起有真值） */
+const serverValues = computed(() => {
+  const map = new Map<string, unknown>();
+  for (const card of props.today.cards) {
+    for (const field of card.fields) map.set(field.name, field.value);
+  }
+  return map;
+});
+
+/** 合并取值：本地草稿优先，其次服务端值（FieldValueGetter 口径：未填 → null） */
+const mergedGet: FieldValueGetter = (name) => {
+  const d = getDraft(name);
+  return d !== null ? d : (serverValues.value.get(name) ?? null);
+};
+
+/**
+ * 各卡实时角标（F1-03）：shared `computeCardBadge` 与 api 端同一函数同一口径。
+ * key 取自 shared 字典（服务端卡片即由它驱动），查不到时回退接口给的静态角标。
+ */
+const liveBadges = computed(() => {
+  const map = new Map<string, BadgeDto>();
+  for (const card of props.today.cards) {
+    const def = CARD_BY_KEY[card.key as CardKey];
+    map.set(card.key, def ? computeCardBadge(def, mergedGet) : card.badge);
+  }
+  return map;
+});
+
+/** 顶部进度条 = 12 张卡实时角标之和（同源汇总，不是两套计数） */
+const liveProgress = computed<BadgeDto>(() => {
+  return [...liveBadges.value.values()].reduce<BadgeDto>(
+    (acc, b) => ({
+      filled: acc.filled + b.filled,
+      total: acc.total + b.total,
+      pending: acc.pending + b.pending,
+      abnormal: acc.abnormal + b.abnormal,
+    }),
+    { filled: 0, total: 0, pending: 0, abnormal: 0 },
+  );
+});
+
+/** 分母为 0 的卡（电梯/值班室）是否有任意字段已填（含本地草稿），供角标显示「已填」 */
+function anyFilledOf(card: CardDto): boolean {
+  return card.fields.some((f) => f.filled || isFilledValue(mergedGet(f.name as never)));
+}
 
 /** 记录状态中文（技术方案 §5.4 状态机：草稿 → 已提交 →（确认）已完成；（异议）有异议） */
 const STATUS_LABEL: Record<string, string> = {
@@ -24,16 +84,16 @@ const STATUS_LABEL: Record<string, string> = {
 };
 
 /**
- * 顶部进度条（F1-03）。百分比由 `progress` 现算——接口只给计数不给百分比，
+ * 顶部进度条（F1-03）。百分比由实时角标现算——接口只给计数不给百分比，
  * 免得舍入口径成为第三个待确认项；分母为 0（极端情况）时按 0% 处理，不产生 NaN。
  */
 const percent = computed(() => {
-  const { filled, total } = props.today.progress;
+  const { filled, total } = liveProgress.value;
   return total === 0 ? 0 : Math.round((filled / total) * 1000) / 10;
 });
 
 const progressText = computed(() => {
-  const { filled, total, pending, abnormal } = props.today.progress;
+  const { filled, total, pending, abnormal } = liveProgress.value;
   const base = `已填 ${filled} / ${total} 项`;
   const rest = [`待填 ${pending}`];
   if (abnormal > 0) rest.push(`异常 ${abnormal}`);
@@ -111,6 +171,8 @@ const syncText = computed(() => (props.today.pending_sync ? '待同步' : '已�
           v-for="(card, i) in today.cards"
           :key="card.key"
           :card="card"
+          :badge="liveBadges.get(card.key)"
+          :any-filled="anyFilledOf(card)"
           :data-index="i"
           @open="(key) => $emit('open', key)"
         />
