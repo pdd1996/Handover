@@ -6,7 +6,7 @@
  * 检查项：
  *  1. 台账：规格编号唯一、前缀计数与编号规则表一致、总数与进度速览一致、规格行列数完整
  *  2. 测试用例清单：每个用例编号的规格部分存在于台账、各节实际条数与节标题声明一致、Phase 1 合计一致
- *  3. 任务分解：TK- 编号唯一、数量与 README 声明一致
+ *  3. 任务分解：TK- 编号唯一、数量与 README 声明一致、任务行列数完整且无空单元格
  *  4. README：全部相对链接目标存在
  *  5. docs/ 文件命名符合 Handover-主题-vX.Y.md
  *
@@ -160,6 +160,16 @@ else {
   dupT.length
     ? fail(`任务编号重复：${[...new Set(dupT)].join('、')}`)
     : pass(`TK- 编号唯一（${tks.length} 个）`);
+
+  // 任务行列数完整（表头 6 列：编号/任务/关联规格/完成判据/依赖/状态）且无空单元格
+  const tkRows = read(join(docs, taskFile)).filter((l) => /^\|\s*TK-\d+\s*\|/.test(l));
+  const badTk = tkRows.filter((l) => {
+    const c = l.split('|').slice(1, -1).map((s) => s.trim());
+    return c.length !== 6 || c.some((x) => x === '');
+  });
+  badTk.length
+    ? fail(`任务行列数/空值异常：${badTk.map((l) => l.match(/^\|\s*(TK-\d+)/)[1]).join('、')}`)
+    : pass(`全部 ${tkRows.length} 个任务行列数完整、无空单元格`);
 
   const readmeText = read(join(root, 'README.md')).join('\n');
   const claimT = Number(readmeText.match(/(\d+) 个任务/)?.[1] || 0);
