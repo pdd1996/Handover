@@ -11,6 +11,8 @@
  * ——TK-04 已评审验收，不为迁移而动它；后续接口扩充时一并归入本文件。
  */
 
+import type { RecordStatus } from './enums';
+import type { RecordFieldName } from './fields';
 import type { SectionNo } from './sections';
 
 // ── 契约 §3.2 GET /records/today（今日交接首页；F1-01、F1-02、F1-03）─────────
@@ -42,7 +44,7 @@ export interface BadgeDto {
 export interface CardFieldStateDto {
   /** records 列名（= 字段字典的 name） */
   name: string;
-  /** 是否计入"应填"分母（TK-05 静态口径，TK-06 落地 F1-08 后转动态判定） */
+  /** 是否计入"应填"分母（TK-06 起动态判定：条件必填按同卡已填值触发，见 cards.ts isRequiredField） */
   required: boolean;
   filled: boolean;
   abnormal: boolean;
@@ -99,7 +101,7 @@ export interface TodayRecordDto {
   id: number;
   record_no: string;
   /** draft / submitted / objection / completed（技术方案 §5.4 状态机） */
-  status: string;
+  status: RecordStatus;
   version: number;
   submitted_at: string | null;
 }
@@ -125,4 +127,47 @@ export interface TodayDto {
   progress: BadgeDto;
   sections: SectionStateDto[];
   cards: CardDto[];
+}
+
+// ── 契约 §3.2 GET /records/today/prev（上一班读数带出；F1-05、F1-15、DATA-02、F3-07；TK-07）─────────
+
+/** 上一班已提交记录（带出数据源；只回传比对所需的最小记录级字段） */
+export interface PrevRecordDto {
+  /** 上一班班次起始日（C-08；恒为今日班次日期 − 1 天，见 `PrevDto.prev` 注） */
+  duty_date: string;
+  record_no: string;
+  /** submitted / objection / completed（draft 不会出现在这里，见 `PrevDto.prev` 注） */
+  status: RecordStatus;
+  submitted_at: string | null;
+  version: number;
+  /**
+   * 上一班各字段读数：snake_case 字段名 → 原值（decimal 为字符串，与 Drizzle 一致）。
+   * 仅回传**字段字典内的 records 存储列**（板块 ≥1）：基础信息列在记录级字段已回显，
+   * `lo_night_use` 等跨记录派生列非存储列不回传。液氧 8:30 卡的带出取值映射见 `cards.ts prevSourceField`。
+   */
+  readings: Readonly<Partial<Record<RecordFieldName, unknown>>>;
+}
+
+/** GET /records/today/prev 响应体 */
+export interface PrevDto {
+  /** 当前班次起始日（C-08）；回显供前端与 GET /records/today 的 duty_date 互核 */
+  duty_date: string;
+  /**
+   * 首班标记（F1-15）：今日之前**无任何记录**（首次启用）→ true，
+   * 前端提示「首班记录，无上一班数据可比对」。
+   */
+  first_day: boolean;
+  /**
+   * 上一班已提交记录。null 的两种语义由 `first_day` 区分（前端提示不同）：
+   * - **上一班数据缺失**（F3-07，first_day=false）：今日之前有记录但**相邻班次**
+   *   （duty_date = 今日班次日期 − 1 天）无行（漏交，F6-06 检测的场景）或该行为 draft
+   *   （上一班未提交）→ 比对值显示"—"并允许补录上一班读数（补录入口与提交侧校验随
+   *   TK-12/TK-14 落地）；
+   * - **首班**（F1-15，first_day=true）：今日之前无任何记录。
+   *
+   * **不回落更早的历史记录**（D-T17）：F1-05 的「前一条」按班次相邻取数，跳过缺失班次取
+   * 更早记录会以旧值冒充上一班（F1-05-T2 判据「不显示脏数据」），且用量计算（TK-13 复用
+   * 同一取数）会把跨天用量当 1 天固化，与 F3-07「缺失 → 补录」相悖。
+   */
+  prev: PrevRecordDto | null;
 }

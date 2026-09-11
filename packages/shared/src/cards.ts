@@ -44,6 +44,7 @@
 
 import type { RecordFieldName } from './fields';
 import { FIELD_BY_NAME } from './fields';
+import type { BadgeDto } from './dto';
 import type { SectionNo } from './sections';
 
 /** 卡片 key（稳定标识；不用 sort_no，因后台可调整点位排序） */
@@ -298,7 +299,7 @@ type AssertCardKeysMatch = [CardKey] extends [CardKeysInDict]
 export const CARD_KEYS_MATCH: AssertCardKeysMatch = true;
 
 /**
- * 条件必填字段：是否需要填**取决于同卡其他字段的值**，故不计入进度条分母——
+ * 条件必填字段：是否需要填**取决于同卡其他字段的值**，故未触发前不计入进度条分母——
  * 否则师傅把该填的都填完，进度条仍到不了 100%，违反 F1-03-T1 判据「计数与实际一致」。
  *
  * 逐条出处：
@@ -306,11 +307,15 @@ export const CARD_KEYS_MATCH: AssertCardKeysMatch = true;
  *   附录 A 板块二「高配房是否正常 —— **异常时必填备注**」，其余状态字段同理（仅 status='bad' 时必填）
  * - `boiler_no` / `supply_temp` / `return_temp`：附录 A 板块五「**停机时置灰不填**」；
  *   DATA-05、TK-10「锅炉停机联动：停机时不参与必填校验」
- * - `t2_c830` / `t2_p830` / `t2_c2030` / `t2_p2030`：仅当 `tank_in_use`=2 时必填
- *   （PRD v0.2.5「在用罐由枚举选择驱动」；DATA-03/04、TK-09）
  *
- * **TK-06 落地 F1-08（必填校验）时，此处升级为按已填值动态判定**（如 tank_in_use 已选 2 号
- * 则 t2_* 转为必填并重算分母）；届时只需改本集合的求值方式，卡片与接口结构不变。
+ * **本集合是「条件必填」的定义清单（静态），动态判定见 `isRequiredField`**：触发条件由同卡
+ * 其他字段的已填值求值（备注类看状态是否 'bad'、锅炉三项看 boiler_run 是否 'run'），
+ * 卡片与接口结构不变。
+ *
+ * 注：`t2_c830/t2_p830/t2_c2030/t2_p2030` 曾在本集合（TK-05 按「仅 tank_in_use=2 时必填」
+ * 处理），与台账 **DATA-01「液氧两罐两时点的含量/压力均为必填（共 8 项，含 1 号罐压力）」**
+ * （PRD v0.2.5 修订 3：demo 曾漏 1 号罐压力，已补齐）冲突——TK-06 起按 DATA-01 归位为**恒必填**。
+ * 「在用罐由枚举选择驱动」（DATA-03/04）驱动的是**日间用量取数与卡片标题**，不是必填口径。
  */
 export const CONDITIONAL_FIELDS: ReadonlySet<RecordFieldName> = new Set<RecordFieldName>([
   'hp_note',
@@ -322,10 +327,6 @@ export const CONDITIONAL_FIELDS: ReadonlySet<RecordFieldName> = new Set<RecordFi
   'boiler_no',
   'supply_temp',
   'return_temp',
-  't2_c830',
-  't2_p830',
-  't2_c2030',
-  't2_p2030',
 ]);
 
 /**
@@ -345,12 +346,16 @@ export const NON_COUNTABLE_FIELDS: ReadonlySet<RecordFieldName> = new Set<Record
 ]);
 
 /**
- * 该字段是否计入「应填」分母（F1-03 角标与顶部进度条）。
+ * 该字段是否计入「应填」分母（F1-03 角标与顶部进度条）——**静态口径**。
  *
  * 口径：只数**师傅需要亲手填或选**的字段——`fill ∈ {manual, select}` 且非条件必填/纯选填。
  * 排除 `auto`（water_use / e_use / gas_use / lo_night_use / lo_measured_am|pm 等服务端派生列）
  * 与 `auto_editable`（lo_day_use 自动推荐值即视为已填），因为它们在提交前恒为 NULL
  * （契约 §4 第 3 步：用量由服务端提交时计算固化），计入分母会让进度条永远到不了 100%。
+ *
+ * **运行期请优先用 `isRequiredField(name, get)` 动态判定**（TK-06 起，dto.ts
+ * `CardFieldStateDto.required` 已转动态口径）；本函数保留为「字段值全空时的静态分母」，
+ * 供 `COUNTABLE_FIELD_TOTAL` 等总量常量与编译期锁定使用。
  */
 export function isCountableField(name: RecordFieldName): boolean {
   const fill = FIELD_BY_NAME[name].fill;
@@ -400,3 +405,122 @@ export const DUPLICATE_CARD_FIELD_OWNERS: readonly RecordFieldName[] = (() => {
 export const COVERED_SECTIONS: readonly SectionNo[] = [
   ...new Set<SectionNo>(TASK_CARDS.flatMap((c) => [...c.sections])).values(),
 ].sort((a, b) => a - b);
+
+// ── 动态必填与实时角标（TK-06，F1-08 / F1-03）───────────────────────────────
+
+/** 字段取值函数：入参字段名，返回当前值（无值为 null）。api 传 records 行取值，h5 传「草稿 ?? 服务端」合并取值 */
+export type FieldValueGetter = (name: RecordFieldName) => unknown;
+
+/**
+ * 是否已填。**数值 0 与布尔 false 均算已填**（0 是有效读数），故不可用 falsy 判定；
+ * 空字符串与空数组算未填（handover_note 留空、hvac_locs 未勾选）。
+ * （与 records.service.ts 的 isFilled 同口径——三端共用本实现，防两处漂移。）
+ */
+export function isFilledValue(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  if (typeof value === 'string') return value.trim() !== '';
+  if (Array.isArray(value)) return value.length > 0;
+  return true;
+}
+
+/**
+ * 备注类条件必填的触发字段：状态选「异常」（'bad'）时对应备注转必填
+ * （附录 A「异常时必填备注」；ABNORMAL_STATUS 口径见 records.service.ts）。
+ */
+const NOTE_REQUIRED_WHEN_BAD: Readonly<Partial<Record<RecordFieldName, RecordFieldName>>> = {
+  hp_note: 'hp_status',
+  neg_note: 'neg_status',
+  air_note: 'air_status',
+  boiler_note: 'boiler_status',
+  coolroom_note: 'coolroom_status',
+  hvac_note: 'hvac_status',
+};
+
+/** 运行期才必填的字段：锅炉运行（boiler_run='run'）时锅炉号/出水/回水温度必填，停机不填（DATA-05） */
+const REQUIRED_WHEN_BOILER_RUN: ReadonlySet<RecordFieldName> = new Set<RecordFieldName>([
+  'boiler_no',
+  'supply_temp',
+  'return_temp',
+]);
+
+/** 锅炉「运行」枚举值（enums.ts RunStop；直接引用字面量避免循环依赖负担） */
+const BOILER_RUN_ON = 'run';
+
+/** 状态「异常」枚举值（enums.ts OkBadStatus） */
+const STATUS_BAD = 'bad';
+
+/**
+ * 动态必填判定（F1-08 必填校验的单一权威实现，三端同源）：
+ *
+ * 0. **推定原则**（留痕，TK-06 评审遗漏二）：附录 A 数据字典**未设「必填」列**，除附录 A /
+ *    台账明示的例外（备注类「异常时必填备注」、DATA-05「停机时置灰」、纯选填两条）外，
+ *    其余 manual/select 字段**默认必填**——分支 5 的「恒必填」即该推定的落点。推定属保守
+ *    口径（宁多点名、不漏校验）；若业务上存在新例外（如多选字段 hvac_locs 是否允许全不勾，
+ *    新风停用季节是真实场景，见台账待确认清单第 9 项），须待确认后回改本函数与分母口径，
+ *    消费端不得自行放宽；
+ * 1. `fill ∉ {manual, select}`（auto/auto_editable 派生列）→ 恒不必填；
+ * 2. 纯选填（OPTIONAL_FIELDS：handover_note / energy_note）→ 恒不必填；
+ * 3. 备注类：对应状态字段 = 'bad' 时必填；
+ * 4. 锅炉运行三项：boiler_run = 'run' 时必填；
+ * 5. 其余 manual/select 字段**恒必填**——含液氧两罐两时点 8 项读数（DATA-01）。
+ *
+ * 分母口径随之动态化（dto.ts `CardFieldStateDto.required` 的 TK-06 转正）：
+ * 未触发的条件必填不计入「应填」，师傅填完该填的进度条即可到 100%（F1-03-T1）。
+ */
+export function isRequiredField(name: RecordFieldName, get: FieldValueGetter): boolean {
+  const def = FIELD_BY_NAME[name];
+  if (def.fill !== 'manual' && def.fill !== 'select') return false;
+  if (OPTIONAL_FIELDS.has(name)) return false;
+  const noteTrigger = NOTE_REQUIRED_WHEN_BAD[name];
+  if (noteTrigger) return get(noteTrigger) === STATUS_BAD;
+  if (REQUIRED_WHEN_BOILER_RUN.has(name)) return get('boiler_run') === BOILER_RUN_ON;
+  return true;
+}
+
+/**
+ * 按当前字段值实时计算卡片角标（F1-03「实时汇总已填/待填/异常」）。
+ *
+ * api 端（GET /records/today）与 h5 端（草稿合并值）共用：服务端传 records 行取值，
+ * h5 传「本地草稿 ?? 服务端值」的合并取值，两端同一函数、同一口径，杜绝各算一套。
+ * 「已填」与「异常」不互斥：状态字段 = 'bad' 时 filled 与 abnormal 同时 +1（dto.ts 注）。
+ */
+export function computeCardBadge(card: CardDef, get: FieldValueGetter): BadgeDto {
+  let filled = 0;
+  let total = 0;
+  let abnormal = 0;
+  for (const name of card.fields) {
+    const value = get(name);
+    const required = isRequiredField(name, get);
+    if (required) {
+      total += 1;
+      if (isFilledValue(value)) filled += 1;
+    }
+    if (FIELD_BY_NAME[name].kind === 'status' && value === STATUS_BAD) abnormal += 1;
+  }
+  return { filled, total, pending: total - filled, abnormal };
+}
+
+// ── 上一班读数带出映射（TK-07，F1-05 / DATA-02）────────────────────────────────────────
+
+/**
+ * 带出取值映射：当前字段 → 上一班记录中的**源字段名**（未列出者取同名字段）。
+ *
+ * 唯一的跨时点映射在液氧 8:30 卡：DATA-02「液氧 8:30 填写时带出**昨日 20:30** 值供比对」
+ * （测试用例判据原文「取昨日记录 20:30（非今日）」）——今日 8:30 读数的前一基准是
+ * 上一班记录的 20:30 读数，而非上一班记录的同名 8:30 字段。20:30 卡（lo_pm）与
+ * 其余卡片均取同名字段（同时点跨记录比对）。
+ *
+ * 消费方：api 端不做映射（GET /records/today/prev 原样回传上一班 readings，见 dto.ts），
+ * h5 端渲染上一班比对值时经本函数取源字段——三端同源，杜绝前端各写一份映射而漂移。
+ */
+export const PREV_SOURCE_FIELD: Readonly<Partial<Record<RecordFieldName, RecordFieldName>>> = {
+  t1_c830: 't1_c2030',
+  t1_p830: 't1_p2030',
+  t2_c830: 't2_c2030',
+  t2_p830: 't2_p2030',
+};
+
+/** 当前字段的上一班比对源字段名（未列入映射者取同名字段） */
+export function prevSourceField(name: RecordFieldName): RecordFieldName {
+  return PREV_SOURCE_FIELD[name] ?? name;
+}

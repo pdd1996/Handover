@@ -387,3 +387,76 @@ export const FIELD_BY_NAME: Readonly<Record<RecordFieldName, FieldDef>> = Object
 
 /** 全部字段名（运行期遍历/校验用） */
 export const FIELD_NAMES: readonly RecordFieldName[] = FIELDS.map((f) => f.name);
+
+/** 数值精度：与 MySQL DECIMAL(p, s) 对齐的 [precision, scale] 二元组 */
+export type FieldPrecision = readonly [precision: number, scale: number];
+
+/**
+ * 逐字段数值精度（TK-06 评审 M4）：**DECIMAL 列逐项照录**《技术方案与数据库设计 v0.2》§4.2
+ * records 建表 DDL，与 apps/api/src/db/schema.ts 的 drizzle decimal 定义一致；**INT 列
+ * （瓶库五项）DDL 无精度声明，按 INT 上限 2147483647 惯例推导记 [10, 0]**，非抄录。
+ *
+ * 为什么抄录而非运行时派生（如 api 侧 getTableConfig）：shared 保持**零依赖**是既有设计
+ * 约束（三端同源的基础包，引 ORM 会污染 h5/admin 构建链）——折中即抄录 + 此处钉死出处，
+ * DDL 变更时三处（技术方案 §4.2 / schema.ts / 本表）联动，漏改由
+ * `NUMERIC_FIELDS_MISSING_PRECISION` 与精度哨兵（records-validation.spec.ts F1-08-T2 内）暴露。
+ *
+ * 口径：瓶库五项（b40/b10/b6/b_co2/b_pulm）为 **INT 整数列**，按位数惯例推导记 [10, 0]
+ * （见上，非 DDL 抄录）；`lo_night_use` 是跨记录派生列（非 records
+ * 存储，见头部说明），差值口径与 lo_day_use 同为 (8,2)。用途：TK-12 提交校验可据此派生
+ * 录入上限（整数位 = p − s）；预警区间（F4-04）仍是预警口径，不混作录入校验。
+ */
+export const FIELD_PRECISION: Readonly<Partial<Record<RecordFieldName, FieldPrecision>>> = {
+  // (12,1)——水/电/气表读数与用量（§4.2 一、二、三，DDL 抄录）
+  water_reading: [12, 1],
+  water_use: [12, 1],
+  e1_reading: [12, 1],
+  e2_reading: [12, 1],
+  e_use: [12, 1],
+  g1_remaining: [12, 1],
+  g2_remaining: [12, 1],
+  gas_use: [12, 1],
+  // (8,2)——液氧含量（L）与日/夜间用量
+  t1_c830: [8, 2],
+  t1_c2030: [8, 2],
+  t2_c830: [8, 2],
+  t2_c2030: [8, 2],
+  lo_day_use: [8, 2],
+  lo_night_use: [8, 2],
+  // (5,2)——压力类（MPa）
+  t1_p830: [5, 2],
+  t1_p2030: [5, 2],
+  t2_p830: [5, 2],
+  t2_p2030: [5, 2],
+  lo_station_press: [5, 2],
+  hbo_press: [5, 2],
+  manifold_press: [5, 2],
+  co2_out_press: [5, 2],
+  p1_press: [5, 2],
+  p3_press: [5, 2],
+  // (5,1)——温度类（°C）
+  supply_temp: [5, 1],
+  return_temp: [5, 1],
+  h1_set_temp: [5, 1],
+  h1_out_temp: [5, 1],
+  h3_set_temp: [5, 1],
+  h3_out_temp: [5, 1],
+  // (6,2)——水位高度（m）
+  p1_height: [6, 2],
+  p3_height: [6, 2],
+  // INT 整数——瓶库满瓶数（§4.2 四：b40/b10/b6/b_co2/b_pulm INT；DDL 无精度声明，按位数惯例推导）
+  b40: [10, 0],
+  b10: [10, 0],
+  b6: [10, 0],
+  b_co2: [10, 0],
+  b_pulm: [10, 0],
+};
+
+/**
+ * 应登记而未登记精度的数值字段（**应恒为空**）：kind='number' 却不在 FIELD_PRECISION
+ * 的字段清单。与 cards.ts `DUPLICATE_CARD_FIELD_OWNERS` 同款策略——不在模块加载时抛错
+ * （shared 被三端 import，字典笔误不能直接崩），由用例断言为空（黄金值哨兵）。
+ */
+export const NUMERIC_FIELDS_MISSING_PRECISION: readonly RecordFieldName[] = FIELD_NAMES.filter(
+  (name) => FIELD_BY_NAME[name].kind === 'number' && !(name in FIELD_PRECISION),
+);

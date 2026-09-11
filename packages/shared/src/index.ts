@@ -8,6 +8,7 @@
  * - cards：首页 12 张任务卡字典与卡片→字段映射（PRD §6.0/§6.1，F1-02/F1-03；TK-05）
  * - dto：API 契约响应类型（按契约 §3 路由分节；api 产出、h5/admin 消费同一份）
  * - errors：统一错误响应结构 + 锚点生成（《API 契约》§2/§4，C-09）
+ * - validation：必填/数值范围校验引擎（F1-08；h5 卡内校验与 api 提交校验同源，TK-06）
  *
  * 消费方式：h5/admin 经 Vite alias 直用本 TS 源码；api 经 dist（先 `pnpm --filter @handover/shared build`）。
  */
@@ -18,6 +19,7 @@ export * from './fields';
 export * from './cards';
 export * from './dto';
 export * from './errors';
+export * from './validation';
 
 import type { ApiError, MissingField } from './errors';
 import { toMissingField } from './errors';
