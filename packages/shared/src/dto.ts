@@ -131,6 +131,33 @@ export interface TodayDto {
   cards: CardDto[];
 }
 
+/**
+ * 表单选项类配置键白名单（TK-11，DATA-07）：**三端同源的单一来源**——api configs.service
+ * 据此查询/构造响应，h5 SectionView 据此取候选，configs.spec 据此断言。新增表单清单键
+ * 只改这里，契约 §3.7 与台账同步回写（拼错键名/漏加键在此处编译期即报，TK-11 评审 M5）。
+ */
+export const FORM_OPTION_CONFIG_KEYS = ['hvac_locs', 'boiler_list'] as const;
+export type FormOptionConfigKey = (typeof FORM_OPTION_CONFIG_KEYS)[number];
+
+/**
+ * GET /configs 响应体（TK-11，DATA-07「新风使用位置多选，候选清单后台配置」）：
+ * **表单选项类配置的白名单只读视图**——configs 表另有阈值/会话时长等运营键，
+ * 师傅端表单只消费清单类（键集见 `FORM_OPTION_CONFIG_KEYS`），非白名单键不经此端点出网
+ * （运营口径的读取归科长后台 GET /admin/configs，契约 §3.6）。值统一为
+ * configs.config_value 的 JSON 数组解析结果，h5 据此渲染多选/枚举候选。
+ *
+ * 类型为**显式键映射**而非开放 index signature：键名拼错编译期即失败，且
+ * `noUncheckedIndexedAccess` 下开放签名会吞掉键名错误的编译期报错（评审 M5）。
+ *
+ * 候选值 ❓ 均为《开发种子数据》占位（待总务科）：科长后台改 configs 即生效，
+ * 下一班表单即时反映（F4-11 精神，技术方案修订 4「自定义灵活性放在配置层」）。
+ * **提交侧不校验候选成员性**（h5 离线降级用占位候选，成员性校验会把降级路径变 400，
+ * 违反 F1-09/C-01；如需引入随 TK-27 配置中心评估，契约 §3.7）。
+ */
+export type FormOptionsDto = {
+  readonly [K in FormOptionConfigKey]: readonly string[];
+};
+
 // ── 契约 §3.2 GET /records/today/prev（上一班读数带出；F1-05、F1-15、DATA-02、F3-07；TK-07）─────────
 
 /** 上一班已提交记录（带出数据源；只回传比对所需的最小记录级字段） */
