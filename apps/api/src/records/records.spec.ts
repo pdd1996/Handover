@@ -399,7 +399,8 @@ describe('F1-01/F1-02/F1-03 今日交接首页（TK-05）', () => {
     });
 
     it('填写一项 → 该卡与进度条 filled +1、pending −1（实时汇总）', async () => {
-      // 造一条 draft 行模拟 TK-08（PUT /records/today/draft）的产物；GET 本身不建行（见 F1-01-T1）
+      // 造一条 draft 行模拟撤回（F2-08，TK-21）后的产物——在线草稿不落服务端（D-T18），
+      // 服务端 draft 行仅由撤回产生；GET 本身不建行（见 F1-01-T1）
       const submitter = await db.select({ id: records.submitterId }).from(records).limit(1);
       await db.insert(records).values({
         recordNo: TEST_RECORD_NO,
@@ -474,7 +475,7 @@ describe('F1-01/F1-02/F1-03 今日交接首页（TK-05）', () => {
       const body = await fetchToday();
       // 契约 §3.2 要求返回"待同步标记"，但离线待同步队列存于客户端 IndexedDB，
       // F1-07-T2 判据即「服务器无感知（无 draft 泄露）」→ 服务端恒返回占位 false，
-      // 真值由前端本地队列 OR 合并（TK-08 草稿层 / TK-15 离线三层缓冲接管）
+      // 真值由前端待同步队列 OR 合并（TK-15 接管；草稿层不产生待同步语义，D-T18 修订 #9）
       expect(body.pending_sync).toBe(false);
     });
   });

@@ -77,7 +77,9 @@ function isAbnormal(name: RecordFieldName, value: unknown): boolean {
  * 理由三条——① `records.record_no` 为 NOT NULL UNIQUE，而契约 §4 第 5 步与 TK-12 均定"提交时生成
  * record_no"，GET 建行就得先造占位号；② 技术方案 §11 遗留项「服务端 draft 行的产生时机」尚未关闭，
  * 不宜由只读接口擅自定案；③ 种子数据 D0 刻意留空（《开发种子数据》§六「无记录，测试填写全流程」），
- * GET 建行会污染 records=10 的计数口径。draft 行的产生留给 TK-08（PUT /records/today/draft）。
+ * GET 建行会污染 records=10 的计数口径。draft 行的产生时机已随 TK-08 闭环（决策记录 D-T18）：
+ * 服务端不设在线草稿端点（草稿在客户端 IndexedDB），records 行提交时一次性创建，
+ * draft 状态仅由撤回（F2-08，TK-21）产生。
  */
 @Injectable()
 export class RecordsService {
