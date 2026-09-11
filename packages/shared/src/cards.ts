@@ -500,6 +500,70 @@ export function computeCardBadge(card: CardDef, get: FieldValueGetter): BadgeDto
   return { filled, total, pending: total - filled, abnormal };
 }
 
+// ── 液氧使用罐号与测量时刻（TK-09，DATA-03 / DATA-04 / DATA-13）────────────────
+
+/** 使用罐号（schema `mysqlEnum('1','2')`；前端 radio name 与草稿可能存数字或字符串） */
+export type TankNo = 1 | 2;
+
+/** 两罐角色（DATA-03：标题随选择动态显示在用/备用） */
+export type TankRole = 'in_use' | 'backup';
+
+/** 字段名 → 罐号（`t1_*` → 1、`t2_*` → 2；非两罐读数字段返回 null） */
+export function tankNoOfField(name: RecordFieldName): TankNo | null {
+  if (name.startsWith('t1_')) return 1;
+  if (name.startsWith('t2_')) return 2;
+  return null;
+}
+
+/**
+ * 当前在用罐号（DATA-03 枚举取数的单一入口）：`tank_in_use` 未选或非法时为 null。
+ * 消费方：h5 卡片标题/行标签动态渲染、shared `loDayUseOf` 取数（DATA-04）。
+ */
+export function tankInUseOf(get: FieldValueGetter): TankNo | null {
+  const v = get('tank_in_use');
+  const n = typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN;
+  return n === 1 || n === 2 ? n : null;
+}
+
+/**
+ * 某字段（两罐读数）当前的角色：在用 / 备用；罐号未选或字段非两罐读数时为 null。
+ * 判据 DATA-03-T1「选 1 号 → 1 号'在用'、2 号'备用'」的单一权威实现——
+ * h5 SectionView 行标签与首页液氧卡标题后缀共用，杜绝两处各写一套。
+ */
+export function tankRoleOf(name: RecordFieldName, get: FieldValueGetter): TankRole | null {
+  const tank = tankNoOfField(name);
+  const inUse = tankInUseOf(get);
+  if (tank === null || inUse === null) return null;
+  return tank === inUse ? 'in_use' : 'backup';
+}
+
+/** 测量时刻字段（DATA-13，records 列名） */
+export type MeasuredAtField = 'lo_measured_am' | 'lo_measured_pm';
+
+/**
+ * 液氧读数 → 所在时点的测量时刻字段（DATA-13/D-P12：填写时自动记录实际测量时刻）。
+ *
+ * 映射与 cards.ts 头部「830/2030 后缀切分」同源：带 `830` 后缀的读数归属 8:30 卡，
+ * 写入时自动钉 `lo_measured_am`；带 `2030` 后缀的钉 `lo_measured_pm`。消费方：
+ * h5 `SectionView` 写值联动（时刻随读数进草稿，离线即本机时间戳）；单元哨兵
+ * `records-lo.spec.ts` 断言本表键集合恰为液氧 8 项读数，漏项/多项显式红。
+ */
+export const MEASURED_AT_TARGET: Readonly<Partial<Record<RecordFieldName, MeasuredAtField>>> = {
+  t1_c830: 'lo_measured_am',
+  t1_p830: 'lo_measured_am',
+  t2_c830: 'lo_measured_am',
+  t2_p830: 'lo_measured_am',
+  t1_c2030: 'lo_measured_pm',
+  t1_p2030: 'lo_measured_pm',
+  t2_c2030: 'lo_measured_pm',
+  t2_p2030: 'lo_measured_pm',
+};
+
+/** 当前字段的测量时刻落点（非液氧读数返回 null） */
+export function measuredAtTarget(name: RecordFieldName): MeasuredAtField | null {
+  return MEASURED_AT_TARGET[name] ?? null;
+}
+
 // ── 上一班读数带出映射（TK-07，F1-05 / DATA-02）────────────────────────────────────────
 
 /**
