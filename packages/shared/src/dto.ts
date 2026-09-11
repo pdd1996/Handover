@@ -94,8 +94,9 @@ export interface SectionStateDto {
 
 /**
  * 今日记录状态。当日无记录为 **null**——GET /records/today 是只读接口，不创建 draft 行
- * （理由见 `records.service.ts` 头部：record_no 提交时才生成、技术方案 §11 draft 时机未关闭、
- * 种子 D0 刻意留空）。draft 行的产生留给 TK-08（PUT /records/today/draft）。
+ * （理由见 `records.service.ts` 头部：record_no 提交时才生成、D-T15）。draft 行的产生时机已随
+ * TK-08 闭环（决策记录 **D-T18**）：离线优先下草稿存于客户端 IndexedDB，服务端不设在线草稿
+ * 端点，records 行提交时一次性创建；draft 状态仅由撤回（F2-08，TK-21）产生。
  */
 export interface TodayRecordDto {
   id: number;
@@ -116,7 +117,8 @@ export interface TodayDto {
   /**
    * 待同步标记。**TK-05 阶段恒为 false 的占位**：离线待同步队列存于客户端 IndexedDB，
    * 服务器对其零感知（F1-07-T2 判据「服务器无感知（无 draft 泄露）」），故服务端无从返回真值。
-   * 真值由前端本地队列决定并与本字段做 OR 合并（TK-08 草稿层 / TK-15 离线三层缓冲接管）。
+   * 真值由前端待同步队列决定并与本字段做 OR 合并（TK-15 离线三层缓冲接管；草稿层不产生
+   * 待同步语义，见决策记录 D-T18）。
    */
   pending_sync: boolean;
   /** 交班人 = 登录账号（技术方案修订 9：submitter_id 恒以登录人为准） */
