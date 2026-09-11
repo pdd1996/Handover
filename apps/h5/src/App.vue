@@ -13,7 +13,7 @@
  */
 import { computed, onMounted, ref } from 'vue';
 import { showToast } from 'vant';
-import type { PrevDto, TodayDto } from '@handover/shared';
+import type { FormOptionsDto, PrevDto, TodayDto } from '@handover/shared';
 import { ApiRequestError, api, type AuthUser } from './api/client';
 import TodayView from './views/TodayView.vue';
 import SectionView from './views/SectionView.vue';
@@ -47,6 +47,14 @@ const prevInfo = ref<PrevDto | null>(null);
 const prevCache = ref<{ dutyDate: string; dto: PrevDto } | null>(null);
 
 /**
+ * 表单候选配置（TK-11，DATA-07）：App 级拉取、**会话级缓存**——backToToday 每次返回
+ * 首页都会经 loadToday 调到 loadConfigs，已拉到即复用不再重发（评审 M3，与 TK-07 评审
+ * m1 对 /prev 的结论同口径，C-01 填写效率优先）；resetSession 清空后（重新登录）才重拉。
+ * 拉取失败/离线时置 null：SectionView 回落种子占位候选渲染，不阻塞填写。
+ */
+const configs = ref<FormOptionsDto | null>(null);
+
+/**
  * 登录态清理**单一入口**（TK-06 评审遗漏一，二次评审订正）：**已建立登录态后的失效**——
  * 被动掉线（handleSessionLoss 的 401 分支：会话过期/账号被停用）与主动登出（onLogout）、
  * 以及启动恢复失败（bootstrap 的静默 catch）都必须走这里；清空项新增/删减只改本函数，
@@ -62,6 +70,7 @@ function resetSession(): void {
   activeCardKey.value = null;
   prevInfo.value = null;
   prevCache.value = null;
+  configs.value = null;
   draft.clearMemory();
 }
 
@@ -115,6 +124,7 @@ async function loadToday(): Promise<void> {
   try {
     today.value = await api.today();
     void loadPrev();
+    void loadConfigs();
     // F1-09 续填入口：登录态 + 班次键就绪后恢复持久草稿；恢复了有内容的草稿则给
     // 「草稿恢复提示」（PRD §6.1 设计触点）。restore 同键幂等（backToToday 重复调用不重灌）
     if (user.value && (await draft.restore(user.value.id, today.value.duty_date))) {
@@ -124,6 +134,20 @@ async function loadToday(): Promise<void> {
     notify(err);
   } finally {
     loadingToday.value = false;
+  }
+}
+
+/**
+ * 表单候选配置拉取（TK-11）：**会话级缓存（评审 M3）**——已拉到即复用，否则每次
+ * 返回首页都会重发；401 并入 handleSessionLoss 单一入口；其余失败（网络/离线，
+ * TK-15 接管）静默降级为回落候选——候选是渲染辅助数据，不弹错、不阻塞填写。
+ */
+async function loadConfigs(): Promise<void> {
+  if (configs.value !== null) return;
+  try {
+    configs.value = await api.configs();
+  } catch (err) {
+    if (!handleSessionLoss(err)) configs.value = null;
   }
 }
 
@@ -245,6 +269,7 @@ onMounted(bootstrap);
     v-else-if="activeCard"
     :card="activeCard"
     :prev-info="prevInfo"
+    :configs="configs"
     @back="backToToday"
   />
 

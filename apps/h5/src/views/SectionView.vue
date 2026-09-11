@@ -24,8 +24,10 @@
  *   见 cards.ts 注释）+「选运行后填」标记；选「停机」即清空三项停机列，已展开的 C-09
  *   报错面板随清列后状态整体重算（清单与实际一致，评审 m3）。
  *
- * 选项来源边界：`boiler_no` / `hvac_locs` 的候选清单读 configs（TK-11 配置只读端点），
- * 本阶段用《开发种子数据》占位值渲染并在常量处标注 ❓，接入后仅换数据源、结构不变。
+ * 选项来源（TK-11，DATA-07）：`hvac_locs` / `boiler_no` 的候选清单读 GET /configs
+ * （表单选项白名单只读端点，后台改 configs 即生效，F4-11 精神）；端点未拉到
+ * （离线/加载中/服务不可达）时回落《开发种子数据》占位值渲染并在常量处标注 ❓，
+ * 不阻塞填写。多选控件模型绑定用 multiModelOf 的显式数组兜底（TK-06 评审 M1）。
  */
 import { computed, ref } from 'vue';
 import { showToast } from 'vant';
@@ -43,13 +45,18 @@ import {
   tankRoleOf,
   type CardDto,
   type FieldValueGetter,
+  type FormOptionsDto,
   type MissingField,
   type PrevDto,
   type RecordFieldName,
 } from '@handover/shared';
 import { useDraft } from '../store/draft';
 
-const props = defineProps<{ card: CardDto; prevInfo: PrevDto | null }>();
+const props = defineProps<{
+  card: CardDto;
+  prevInfo: PrevDto | null;
+  configs: FormOptionsDto | null;
+}>();
 const emit = defineEmits<{ (e: 'back'): void }>();
 
 const draft = useDraft();
@@ -117,17 +124,35 @@ const ENUM_OPTIONS: Partial<
     { value: 'high', label: '偏高' },
     { value: 'low', label: '偏低' },
   ],
-  // ❓ 锅炉清单待总务科（种子 configs.boiler_list 占位）；TK-11 配置只读端点接入后换数据源
-  boiler_no: [
-    { value: '1号', label: '1 号锅炉' },
-    { value: '2号', label: '2 号锅炉' },
-  ],
 };
 
-// ❓ 新风使用位置候选清单待总务科（种子 configs.hvac_locs 占位）；TK-11 接入后换数据源
-const MULTI_OPTIONS: Partial<Record<RecordFieldName, readonly string[]>> = {
-  hvac_locs: ['手术部', 'ICU', '门诊大厅'],
-};
+// ❓ 候选值均为《开发种子数据》占位（待总务科）：正常数据源为 GET /configs（TK-11），
+// 端点未拉到（离线/加载中/服务不可达）时降级用占位值渲染，不阻塞填写
+const FALLBACK_HVAC_LOCS = ['手术部', 'ICU', '门诊大厅'];
+const FALLBACK_BOILER_LIST = ['1号', '2号'];
+
+/** 多选候选（TK-11）：configs.hvac_locs 优先，未拉到时回落占位 */
+const MULTI_OPTIONS = computed<Partial<Record<RecordFieldName, readonly string[]>>>(() => ({
+  hvac_locs: props.configs?.hvac_locs ?? FALLBACK_HVAC_LOCS,
+}));
+
+/**
+ * 枚举候选：静态枚举与 schema mysqlEnum 逐项一致；`boiler_no` 为配置驱动
+ * （configs.boiler_list）。label = configs 清单原文（评审 M4 定案：配置驱动清单的
+ * 展示文本即清单原文，不硬编码包装规则——对任意后台配置文本都成立；与 TK-11 前
+ * 占位 label「1 号锅炉」的差异已在台账增补 #18 留痕）。
+ */
+function enumOptionsOf(
+  name: RecordFieldName,
+): ReadonlyArray<{ value: string | number; label: string }> {
+  if (name === 'boiler_no') {
+    return (props.configs?.boiler_list ?? FALLBACK_BOILER_LIST).map((v) => ({
+      value: v,
+      label: v,
+    }));
+  }
+  return ENUM_OPTIONS[name] ?? [];
+}
 
 // ── 上一班读数带出（TK-07，F1-05 / F1-15 / F3-07 / DATA-02）────────────────────
 
@@ -175,7 +200,7 @@ function prevOf(name: RecordFieldName): string | null {
   const def = FIELD_BY_NAME[name];
   if (def.kind === 'status') return STATUS_LABEL[String(v)] ?? String(v);
   if (def.kind === 'enum') {
-    const opt = ENUM_OPTIONS[name]?.find((o) => o.value === v);
+    const opt = enumOptionsOf(name).find((o) => o.value === v);
     return opt ? opt.label : String(v);
   }
   return String(v);
@@ -456,23 +481,24 @@ const headerTitle = computed(() =>
               <van-radio name="bad">异常</van-radio>
             </van-radio-group>
 
-            <!-- 枚举单选：选项与 schema mysqlEnum 逐项一致；停机置灰（DATA-05）整组禁用 -->
+            <!-- 枚举单选：静态枚举与 schema mysqlEnum 逐项一致，boiler_no 读 configs（TK-11）；
+                 停机置灰（DATA-05）整组禁用 -->
             <van-radio-group
-              v-else-if="row.kind === 'enum' && ENUM_OPTIONS[row.name]"
+              v-else-if="row.kind === 'enum' && enumOptionsOf(row.name).length > 0"
               :model-value="modelOf(row.name)"
               direction="horizontal"
               :disabled="row.disabled"
               :data-testid="`input-${row.name}`"
               @update:model-value="(v: unknown) => writeValue(row.name, v)"
             >
-              <van-radio v-for="opt in ENUM_OPTIONS[row.name]" :key="opt.value" :name="opt.value">
+              <van-radio v-for="opt in enumOptionsOf(row.name)" :key="opt.value" :name="opt.value">
                 {{ opt.label }}
               </van-radio>
             </van-radio-group>
 
-            <!-- 多选：新风使用位置（候选清单 TK-11 接 configs） -->
+            <!-- 多选：新风使用位置，候选读 configs.hvac_locs（TK-11，DATA-07） -->
             <van-checkbox-group
-              v-else-if="row.kind === 'multi' && MULTI_OPTIONS[row.name]"
+              v-else-if="row.kind === 'multi' && (MULTI_OPTIONS[row.name]?.length ?? 0) > 0"
               :model-value="multiModelOf(row.name)"
               direction="horizontal"
               :data-testid="`input-${row.name}`"
@@ -487,6 +513,17 @@ const headerTitle = computed(() =>
                 {{ opt }}
               </van-checkbox>
             </van-checkbox-group>
+
+            <!-- 配置候选为空（TK-11 评审 M1 定案的配置错误态）：显式提示而非静默退化为只读“—”——
+                 必填推定口径不变（提交仍被点名拦截，cards.ts 规则 0「消费端不得自行放宽」），
+                 科长在后台补配置即恢复；空清单是否允许提交并入台账待确认清单第 9 项复核 -->
+            <div
+              v-else-if="row.kind === 'enum' || row.kind === 'multi'"
+              class="py-1 text-sm text-amber-600"
+              :data-testid="`options-empty-${row.name}`"
+            >
+              候选清单为空，请联系科长在后台配置
+            </div>
 
             <!-- 文本备注：异常说明 / 交接事项 / 节能减排 -->
             <van-field

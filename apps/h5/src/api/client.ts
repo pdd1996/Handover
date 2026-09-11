@@ -9,7 +9,7 @@
  * 响应类型全部取自 `@handover/shared` 的 dto 模块：与 api 端产出的是同一份契约类型，
  * 前端不另写 interface（否则两处随迭代漂移）。
  */
-import type { ApiError, PrevDto, TodayDto, UserRole } from '@handover/shared';
+import type { ApiError, FormOptionsDto, PrevDto, TodayDto, UserRole } from '@handover/shared';
 
 const BASE = '/api/v1';
 
@@ -80,5 +80,10 @@ export const api = {
   /** GET /records/today/prev —— 上一班读数带出（F1-05、F1-15、DATA-02、F3-07；TK-07） */
   prev(): Promise<PrevDto> {
     return http('/records/today/prev');
+  },
+
+  /** GET /configs —— 表单选项类配置白名单（DATA-07：hvac_locs 多选 / boiler_list 枚举候选，TK-11） */
+  configs(): Promise<FormOptionsDto> {
+    return http('/configs');
   },
 };
