@@ -15,6 +15,7 @@ import {
   CARD_BY_KEY,
   computeCardBadge,
   isFilledValue,
+  tankInUseOf,
   type BadgeDto,
   type CardDto,
   type CardKey,
@@ -56,6 +57,20 @@ const liveBadges = computed(() => {
   }
   return map;
 });
+
+/**
+ * 液氧两卡的动态标题后缀（DATA-03，TK-09）：使用罐号选中后两张液氧卡同步显「N号在用」
+ * （shared tankInUseOf 同一取数口径）；未选时为 null，标题保持静态。
+ */
+const tankNote = computed<string | null>(() => {
+  const n = tankInUseOf(mergedGet);
+  return n === null ? null : `${n}号在用`;
+});
+
+/** 仅液氧两卡消费动态后缀（其余卡无此联动，传 null 不渲染） */
+function noteOf(card: CardDto): string | null {
+  return card.key === 'lo_am' || card.key === 'lo_pm' ? tankNote.value : null;
+}
 
 /** 顶部进度条 = 12 张卡实时角标之和（同源汇总，不是两套计数） */
 const liveProgress = computed<BadgeDto>(() => {
@@ -174,6 +189,7 @@ const syncText = computed(() => (props.today.pending_sync ? '待同步' : '已�
           :card="card"
           :badge="liveBadges.get(card.key)"
           :any-filled="anyFilledOf(card)"
+          :note="noteOf(card)"
           :data-index="i"
           @open="(key) => $emit('open', key)"
         />

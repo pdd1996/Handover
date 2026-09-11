@@ -14,11 +14,13 @@ import type { BadgeDto, CardDto } from '@handover/shared';
 /**
  * badge / anyFilled（可选，TK-06）：首页传入的**实时角标**（含本地草稿的合并口径，
  * shared computeCardBadge 计算）与「有无任意字段已填」；不传则回退接口给的静态值。
+ * note（可选，TK-09）：动态标题后缀（液氧两卡显「1号在用/2号在用」，DATA-03）；不传则无后缀。
  */
 const props = defineProps<{
   card: CardDto;
   badge?: BadgeDto;
   anyFilled?: boolean;
+  note?: string | null;
 }>();
 defineEmits<{ (e: 'open', key: string): void }>();
 
@@ -35,7 +37,10 @@ const lead = computed(
 
 const title = computed(() => {
   const suffix = props.card.slot ? (SLOT_SUFFIX[props.card.slot] ?? '') : '';
-  return `${props.card.title}${suffix}`;
+  // 动态后缀（DATA-03，TK-09）：使用罐号选中后液氧两卡标题跟随；未选时不出现，
+  // 今天的静态标题断言（today.spec）不受影响
+  const note = props.note ? ` · ${props.note}` : '';
+  return `${props.card.title}${suffix}${note}`;
 });
 
 /**

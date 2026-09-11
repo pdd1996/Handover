@@ -31,6 +31,9 @@ import {
   isRequiredField,
   isFilledValue,
   prevSourceField,
+  measuredAtTarget,
+  localMeasuredAt,
+  tankRoleOf,
   type CardDto,
   type FieldValueGetter,
   type MissingField,
@@ -178,8 +181,8 @@ const READONLY_HINT: Partial<Record<RecordFieldName, string>> = {
   gas_use: '提交时由服务端自动计算并固化（F3）',
   lo_night_use: '跨记录派生值：昨日 20:30 → 今日 8:30 差值（F3-05）',
   lo_day_use: '自动计算；如需覆盖须填原因留痕（F3-06）',
-  lo_measured_am: '填写读数时自动记录实际测量时刻（DATA-13，TK-09）',
-  lo_measured_pm: '填写读数时自动记录实际测量时刻（DATA-13，TK-09）',
+  lo_measured_am: '填写读数时自动记录实际测量时刻（DATA-13）',
+  lo_measured_pm: '填写读数时自动记录实际测量时刻（DATA-13）',
 };
 
 interface FieldRow {
@@ -202,9 +205,17 @@ const rows = computed<FieldRow[]>(() =>
     const name = f.name as RecordFieldName;
     const def = FIELD_BY_NAME[name];
     const value = get(name);
+    // 两罐读数行标签随使用罐号动态加「（在用）/（备用）」（DATA-03，TK-09；对齐 demo v0.3 验收形态）；
+    // 仅展示层后缀——C-09 点名清单的 label 仍取字典原值（shared toMissingField），两边不受影响
+    const role = tankRoleOf(name, get);
+    const label = def
+      ? role === null
+        ? def.label
+        : `${def.label}（${role === 'in_use' ? '在用' : '备用'}）`
+      : f.name;
     return {
       name,
-      label: def?.label ?? f.name,
+      label,
       unit: def?.unit,
       kind: def?.kind ?? '',
       fill: def?.fill ?? '',
@@ -231,6 +242,13 @@ function displayValue(row: FieldRow): string {
 function writeValue(name: RecordFieldName, v: unknown): void {
   draft.setValue(name, v);
   errorFields.value.delete(name);
+
+  // 实际测量时刻自动记录（DATA-13/D-P12，TK-09）：写液氧读数时随读数把本机时刻写入草稿——
+  // 离线时即为本地时间戳幸存于 IndexedDB（T2 判据客户端半边），提交时随 payload 上送（TK-12），
+  // 服务端原样落库不覆盖。仅读数有值时钉时刻；清空读数不回收（保留已发生的真实测量时刻）。每次写入都刷新：
+  // 实际测量时刻 = 该时点最后一次落笔的时刻，名义时段仅用于卡片组织（技术方案修订 11）
+  const measured = measuredAtTarget(name);
+  if (measured && isFilledValue(v)) draft.setValue(measured, localMeasuredAt());
 }
 
 // ── C-09 报错点名与跳转定位 ─────────────────────────────────────────────────
