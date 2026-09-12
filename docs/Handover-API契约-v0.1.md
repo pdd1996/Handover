@@ -145,7 +145,10 @@
     { "type": "reading_decreased", "field": "water_reading", "reason": "水表更换新表底数" },
     { "type": "gas_refill", "card": 1, "reason": "上午充气 50 立方米" }
   ],
-  "duty_guard_confirm": { "confirmed": true, "reason": "替班" }
+  "duty_guard_confirm": { "confirmed": true, "reason": "替班" },
+  "usage_overrides": [
+    { "field": "lo_day_use", "value": "0.50", "reason": "日间补液，按实际修正" }
+  ]
 }
 ```
 
@@ -153,7 +156,7 @@
 
 1. 必填/范围校验 → 失败 400（C-09 结构）
 2. 防呆判定（读数回退/充气/排班安全阀）→ 有未确认项时 409 并在 `need_confirm` 返回确认清单；客户端弹窗收集 `confirmations` 后重提
-3. 用量计算并固化（F3）：`*_use` 由服务端计算写入，客户端传值仅作展示预览，**不信任**
+3. 用量计算并固化（F3，TK-13 落地）：水/电（两线和、分线展示，D-P09）/气（剩余量减少值合计）/液氧日间（在用罐含量差）四类口径以 shared `calc.ts` 纯函数为单一权威实现，服务端按上一班（相邻班次已提交记录，D-T17，与 GET `/records/today/prev` 同源取数）计算写入，客户端传值仅作展示预览，**不信任**；上一班缺失 → 用量列固化 null（F3-07 补录随 TK-14）。**手工覆盖**走请求体 `usage_overrides[]`（`field` ∈ shared `USAGE_FIELDS`，`value` 十进制字面量按列精度取整，`reason` 必填）：原因空白/值非法/越键 → 400 逐条点名（F3-06-T2 服务端强制，非仅前端）；合法覆盖以覆盖值固化并写审计 `record.usage_override`（F3-04-T2），读取侧 GET `/records/today` 被覆盖字段带 `manual: true`（F3-06-T1「自动计算」标识与人工值可区分，权威形状 shared dto `CardFieldStateDto`）。充气确认后该卡按 0 计（D-P14）属 TK-14 确认后的取数层，未确认时负差原样固化
 4. 生成标红确认行（状态异常/电梯不一致/交接事项拆条）写入 alerts（DEP-08）
 5. 记录转 submitted，`submitted_at` = 服务端收到时刻（DATA-09：离线场景下即同步成功时刻）；生成 record_no
 6. 写审计（含覆盖/确认原因）
@@ -166,6 +169,7 @@
 | --- | --- | --- |
 | POST `/auth/login` | `login` | 设备、IP；失败也记 |
 | POST `/records/today/submit` | `record.submit` + 各确认原因 | reason 列记防呆/充气/覆盖原因 |
+| POST `/records/today/submit`（用量覆盖，TK-13） | `record.usage_override` | 逐覆盖项一行；`reason` 列记覆盖原因（F3-04-T2），`old_value` 记覆盖前服务端算出的自动值——亦为 TK-16 重算豁免（师傅手工覆盖过的值不被重算覆盖，D-T07）的判定依据 |
 | POST `/records/today/withdraw` | `record.withdraw` | 谁、何时 |
 | POST `/records/{id}/objection` | `record.objection` | — |
 | POST `/records/{id}/confirm` | `record.confirm` | — |
@@ -192,3 +196,6 @@
 10. **v0.1 订正（2026-09-12）**：TK-11 评审修复轮——① §3.7 契约要点补明：**提交侧不校验 `hvac_locs` / `boiler_list` 的候选成员性**（服务端仅做 JSON 数组解析回传；h5 离线/端点不可达时以《开发种子数据》占位候选降级渲染，若提交校验按候选成员性拦截会把降级路径变成 400，违反 F1-09 续填与 C-01；成员性校验如确需引入，随 TK-27 配置中心一并评估并回改本表）。② 响应形状由开放索引签名收窄为**显式键映射**（键集单一来源 shared `FORM_OPTION_CONFIG_KEYS`，拼错键名编译期即报），权威形状仍 `@handover/shared` dto `FormOptionsDto`。
 11. **v0.1 订正（2026-09-12）**：TK-12（在线提交与预览）落地联动——§3.2 三行契约要点回填：GET `/records/today` 补「接班人按次日排班自动带出」（F2-01/DATA-10，`TodayDto.receiver` 由恒 null 转为带出值）；`/records/today/preview` 补响应权威形状 shared `PreviewDto`（未填项/异常项两张清单，结构同 §2 `missing_fields`，接班人修改原因条件预检一并点名）；`/records/today/submit` 补落地口径（record_no 格式 `HB-YYYYMMDD-001`、submitted_at=服务端收到时刻（DATA-09）、接班人带出与修改必填原因留痕（DATA-10）、角色列 master 不适用 chief 只读回写口径）。§4 处理顺序挂账现状：第 1 步校验（shared 引擎，含 `FIELD_PRECISION` 派生上限与 parseNumeric 十进制收紧）、第 5/6 步（record_no、submitted_at、审计含接班人修改 reason）已落地；第 2 步防呆 409 随 TK-14（`confirmations`/`duty_guard_confirm` 字段本阶段仅接收不判定）、第 3 步用量固化随 TK-13（`*_use` 提交置 NULL、客户端传值不信任）、第 4 步 alerts 标红随 TK-17/TK-22。补充口径（台账增补 #16）：boiler_run='stop' → 三项停机列强制写 NULL（落库第二道）。DATA-13-T1/T2 服务端「不覆盖」复验已落地（lo_measured_am/pm 原样落库，与 submitted_at 分源）；DATA-07-T1 数组落库复验已落地（hvac_locs JSON 数组原样、不做候选成员性校验，§3.7 口径不变）。错误码表 13 项与路由总数（33）不变。
 12. **v0.1 订正（2026-09-12）**：TK-12 评审修复轮——§4 第 1 步校验口径精确化（错误行为从「可能 500」收敛为「一律 400 点名」）：① 数值字段校验含列精度**位数与小数位**两层（小数位超 DECIMAL(p,s) 的 s 以 VALIDATION_OUT_OF_RANGE 点名，不再被 MySQL 静默改写）；② 文本列长度超 `FIELD_LENGTHS`（varchar 照录 §4.2）以 VALIDATION_OUT_OF_RANGE 点名；③ 测量时刻须为日历有效的 `YYYY-MM-DD HH:mm:ss` 本地时间戳，非法**置 NULL 落库**（不拦提交、不覆盖为服务端时刻，DATA-13/D-P12 分源口径不变）；④ 多选字段元素须为字符串（候选成员性仍不校验，§3.7）；⑤ 接班人：receiver_id 显式上送时一律校验用户存在（不存在 → 400 点名 receiver_id）；无次日排班带出基线时显式指定接班人视为修改、receiver_change_reason 转必填（保守口径，台账增补 #20 留痕，科长复核可放宽）。错误码表 13 项与路由总数（33）不变。
+13. **v0.1 订正（2026-09-12）**：TK-13（用量计算引擎）落地联动——§4 第 3 步用量固化落地：水/电/气/液氧日间四类口径以 shared `calc.ts` 纯函数为单一权威实现（`waterDayUseOf`/`eDayUseOf` 分线+合计/`gasDayUseOf`/`loDayUseOf`），服务端提交时计算固化，上一班取数与 GET `/records/today/prev` 共用同一相邻班次取数（D-T17，不回落更早记录）；上一班缺失 → 用量列固化 null（F3-07 补录随 TK-14）。**新增覆盖协议**：请求体增 `usage_overrides[]`（`field` ∈ shared `USAGE_FIELDS` = water_use/e_use/gas_use/lo_day_use、`value` 十进制字面量按列精度取整、`reason` 必填）——原因空白/值非法/越键即 400 逐条点名（F3-06-T2 服务端强制）；合法覆盖以覆盖值固化并写审计 `record.usage_override`（§5 审计表新增行，old_value 记覆盖前自动值），读取侧 GET `/records/today` 字段状态增 `manual` 旗标（F3-06-T1「自动计算」标识与人工值可区分）。响应形状权威定义 `@handover/shared` dto（`UsageOverridePayload` / `CardFieldStateDto.manual`）。充气确认后该卡按 0 计（D-P14）属 TK-14 确认后的取数层，未确认时负差原样固化。Phase 1 路由总数（33）与错误码表（13 项）不变。
+14. **v0.1 订正（2026-09-12）**：TK-13 独立评审修复轮——① §4 第 3 步校验口径补齐：preview 与 submit 消费同一 `validateUsageOverrides`，`usage_overrides` 的越键/原因空白/原因超长/值越界/同字段重复上送均在**预览即点名**（消除「预览全就绪、提交却 400」，TK-12 评审 L4 同纪律）；覆盖原因超长（audit_logs.reason varchar(200)）以**字段字典名义**点名（与 receiver_change_reason 超长同口径，不再误用「不支持的用量覆盖字段」）。② `manual` 旗标按**当前版本**判定：record_no 恒为 `HB-YYYYMMDD-001`（duty_date UNIQUE），撤回重提/异议重提跨版本共用 targetId 且审计只增不删（D-T09）——旧版本的覆盖不再标到已回到自动值的当前版本上（F3-06-T1），TK-16 重算豁免（D-T07）的判定依据随之钉死为「当前版本的 record.usage_override 行」。③ 服务端计算值超 DECIMAL 列容量（两线差值各自合法但之和可超 (12,1)）→ 该用量列置 null 不入库并记 error 日志（不 500）。④ **覆盖字段范围定案（宽口径）**：D-P08 字面「水/电/气/液氧……手工覆盖必填原因留痕」为准，`USAGE_FIELDS` 四键均可走 `usage_overrides[]`；fields 字典 `fill='auto'` 的语义钉死为「服务端自动计算固化 + Phase 1 无 h5 覆盖入口」，与覆盖协议分属两层——水/电/气三列的 h5 覆盖入口挂账（随记录详情/科长后台任务评估）。错误码表 13 项与路由总数（33）不变。
+13. **v0.1 计正（2026-09-12）**：TK-13（用量计算引擎）落地联动——§4 第 3 步用量固化落地：水/电/气/液氧日间四类口径以 shared `calc.ts` 纯函数为单一权威实现（`waterDayUseOf`/`eDayUseOf` 分线+合计/`gasDayUseOf`/`loDayUseOf`），服务端提交时计算固化，上一班取数与 GET `/records/today/prev` 共用同一相邻班次取数（D-T17，不回落更早记录）；上一班缺失 → 用量列固化 null（F3-07 补录随 TK-14）。**新增覆盖协议**：请求体增 `usage_overrides[]`（`field` ∈ shared `USAGE_FIELDS` = water_use/e_use/gas_use/lo_day_use、`value` 十进制字面量按列精度取整、`reason` 必填）——原因空白/值非法/越键即 400 逐条点名（F3-06-T2 服务端强制）；合法覆盖以覆盖值固化并写审计 `record.usage_override`（§5 审计表新增行，old_value 记覆盖前自动值），读取侧 GET `/records/today` 字段状态增 `manual` 旗标（F3-06-T1「自动计算」标识与人工值可区分）。响应形状权威定义 `@handover/shared` dto（`UsageOverridePayload` / `CardFieldStateDto.manual`）。充气确认后该卡按 0 计（D-P14）属 TK-14 确认后的取数层，未确认时负差原样固化。Phase 1 路由总数（33）与错误码表（13 项）不变。
