@@ -40,7 +40,8 @@ import {
 import { AppModule } from '../app.module';
 import { configureApp } from '../app.setup';
 import { DB, type Db } from '../db/db.module';
-import { auditLogs, records, sessions } from '../db/schema';
+import { auditLogs, records, schedules, sessions, users } from '../db/schema';
+import { plusOneDay } from './duty-date';
 import { RecordsService } from './records.service';
 
 /** 种子统一开发密码（《开发种子数据》§一） */
@@ -138,11 +139,20 @@ describe('F1-01/F1-02/F1-03 今日交接首页（TK-05）', () => {
       expect(after).toHaveLength(before.length);
     });
 
-    it('交班人恒为登录账号（技术方案修订 9：submitter_id 以登录人为准）', async () => {
+    it('交班人恒为登录账号（技术方案修订 9：submitter_id 以登录人为准）；接班人按排班带出（TK-12）', async () => {
       const body = await fetchToday();
       expect(body.submitter.real_name).toBe('张师傅');
-      // 接班人按排班表自动带出属 TK-12（DATA-10），本阶段恒为 null
-      expect(body.receiver).toBeNull();
+      // 接班人带出（TK-12，F2-01/DATA-10）：次日排班人；基准取自种子排班表（不硬编码轮值序）
+      const expected = await db
+        .select({ id: users.id, realName: users.realName })
+        .from(schedules)
+        .innerJoin(users, eq(schedules.userId, users.id))
+        .where(eq(schedules.dutyDate, plusOneDay(dutyDate)))
+        .limit(1);
+      expect(body.receiver).toEqual({
+        id: expected[0]!.id,
+        real_name: expected[0]!.realName,
+      });
     });
 
     it('科长亦可访问（契约 §1「chief：全部 + 配置」覆盖师傅端接口）', async () => {
