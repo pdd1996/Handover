@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { asc, eq, lt } from 'drizzle-orm';
+import { and, asc, eq, lt } from 'drizzle-orm';
 import { getTableConfig } from 'drizzle-orm/mysql-core';
 import {
   FIELDS,
@@ -8,13 +8,20 @@ import {
   FIELD_NAMES,
   SECTION_BY_NO,
   TASK_CARDS,
+  USAGE_FIELDS,
   buildValidationError,
+  eDayUseOf,
+  gasDayUseOf,
   isFilledValue,
   isRequiredField,
+  loDayUseOf,
   localMeasuredAt,
+  numericMaxOf,
   parseNumeric,
+  roundToScaleOf,
   toMissingField,
   validateFields,
+  waterDayUseOf,
   type BadgeDto,
   type CardDef,
   type CardDto,
@@ -30,6 +37,9 @@ import {
   type SubmitPayloadDto,
   type SubmitResultDto,
   type TodayDto,
+  type MissingTarget,
+  type UsageFieldName,
+  type UsageOverridePayload,
 } from '@handover/shared';
 import type { SessionUser } from '../auth/auth.service';
 import { ApiException } from '../common/api-error';
@@ -108,8 +118,21 @@ export function recordNoOf(dutyDate: string): string {
   return `HB-${dutyDate.replaceAll('-', '')}-001`;
 }
 
-/** 用量列（契约 §4 第 3 步：服务端计算固化、客户端传值不信任）——TK-13 计算引擎落地前先置 NULL */
+/**
+ * 用量列（契约 §4 第 3 步：服务端计算固化、客户端传值不信任）。normalizeSections 先置 NULL
+ * （sections里的 *_use 键恒不采信），提交时由 computeUsageValues 以计算值覆盖（TK-13），
+ * 手工覆盖再经 resolveUsageOverrides 改写（F3-04/F3-06）。
+ */
 const SERVER_CALCULATED_KEYS = ['waterUse', 'eUse', 'gasUse', 'loDayUse'] as const;
+
+/** 运行期非法覆盖键的点名项（dto 类型已编译期收窄，此处仅防恶意 payload 越键） */
+const USAGE_OVERRIDE_BAD_FIELD = (raw: string): MissingField => ({
+  // MissingTarget 收窄（记录列名 | elevator:{id}）；恶意 payload 的越键串仅作回显定位用
+  field: raw as MissingTarget,
+  section: 4,
+  label: '不支持的用量覆盖字段',
+  anchor: '#sec-4-usage-override',
+});
 
 /** records 表的 DB 列名集合（用于识别字典里的派生字段，如 lo_night_use 非存储列） */
 const RECORD_DB_COLUMNS: ReadonlySet<string> = new Set(
@@ -235,7 +258,11 @@ export class RecordsService {
     ]);
 
     const recordRow = recordRows[0]?.row;
-    const cards = this.buildCards(spotRows, recordRow);
+    // 人工覆盖标识（TK-13，F3-06-T1「标识与人工值可区分」）：audit 留痕反查，不另设存储列
+    const manualFields = recordRow
+      ? await this.usageOverrideFieldsOf(recordRow.recordNo, recordRow.version)
+      : new Set<string>();
+    const cards = this.buildCards(spotRows, recordRow, manualFields);
     const progress = sumBadges(cards.map((c) => c.badge));
     const sections = aggregateSections(cards);
 
@@ -265,14 +292,12 @@ export class RecordsService {
   async prev(now: Date = new Date()): Promise<PrevDto> {
     const { dutyDate } = await this.resolveDutyDate(now);
 
-    // D-T17（TK-07 评审定案）：「上一班」= **相邻班次**的记录——duty_date 恰为今日班次日期 − 1 天
-    // （日历事实，复用 duty-date.ts 的 minusOneDay，勿另写日历推算）。相邻日无行（漏交，F6-06
-    // 检测的场景）或该行为 draft（上一班未提交）→ 上一班缺失（F3-07，前端显"—"并允许补录），
-    // **不回落更早记录**——以旧值冒充上一班违反 F1-05-T2 判据「不显示脏数据」，且 TK-13 复用
-    // 同一取数时会把跨天用量当 1 天固化。首班（F1-15）= 今日之前无任何记录。
-    const prevDate = minusOneDay(dutyDate);
-    const [adjacentRows, anyEarlier] = await Promise.all([
-      this.db.select({ row: records }).from(records).where(eq(records.dutyDate, prevDate)).limit(1),
+    // 「上一班」= 相邻班次已提交记录（D-T17，取数实现见 adjacentPrevRow）；首班（F1-15）
+    // = 今日之前无任何记录；相邻班次无行（漏交，F6-06 检测的场景）或该行为 draft →
+    // 上一班缺失（F3-07，前端显“—”并允许补录）——**不回落更早记录**（以旧值冒充上一班
+    // 违反 F1-05-T2 判据「不显示脏数据」，且用量计算复用同一取数会把跨天用量当 1 天固化）。
+    const [adjacent, anyEarlier] = await Promise.all([
+      this.adjacentPrevRow(dutyDate),
       this.db
         .select({ id: records.id })
         .from(records)
@@ -284,13 +309,30 @@ export class RecordsService {
       // F1-15 首班：今日之前无任何记录（首次启用，《开发种子数据》D-10 场景）
       return { duty_date: dutyDate, first_day: true, prev: null };
     }
-    const adjacent = adjacentRows[0]?.row;
-    if (!adjacent || adjacent.status === 'draft') {
-      // F1-05-T2 / F3-07：相邻班次无已提交记录（漏交或未提交）→ 缺失态（非首班）：
-      // 草稿值不作为带出数据源，也不跳过缺失班次回落更早记录
-      return { duty_date: dutyDate, first_day: false, prev: null };
-    }
-    return { duty_date: dutyDate, first_day: false, prev: this.toPrevRecord(adjacent) };
+    // F1-05-T2 / F3-07：相邻班次无已提交记录（漏交或未提交）→ 缺失态（非首班）：
+    // 草稿值不作为带出数据源，也不跳过缺失班次回落更早记录
+    return {
+      duty_date: dutyDate,
+      first_day: false,
+      prev: adjacent ? this.toPrevRecord(adjacent) : null,
+    };
+  }
+
+  /**
+   * 相邻班次的已提交记录（**D-T17「前一条」口径的单一实现**）：duty_date 恰为今日班次日期 − 1 天
+   * （日历事实，复用 duty-date.ts 的 minusOneDay，勿另写日历推算）+ 非 draft 资格（draft 仅由
+   * 撤回产生，D-T18）。返回 null = 上一班缺失（F3-07），不回落更早记录。
+   * 消费方：GET /records/today/prev 带出（TK-07）与提交时用量计算（TK-13）——两者**必须共用
+   * 同一取数**，否则带出显示与用量固化各取各的「上一班」，出现「显示 A 班值、算的是 B 班差」。
+   */
+  private async adjacentPrevRow(dutyDate: string): Promise<typeof records.$inferSelect | null> {
+    const rows = await this.db
+      .select({ row: records })
+      .from(records)
+      .where(eq(records.dutyDate, minusOneDay(dutyDate)))
+      .limit(1);
+    const row = rows[0]?.row;
+    return row && row.status !== 'draft' ? row : null;
   }
 
   /**
@@ -360,6 +402,162 @@ export class RecordsService {
     return FIELD_NAMES.filter(
       (name) => FIELD_BY_NAME[name].kind === 'status' && sections[name] === ABNORMAL_STATUS,
     ).map((name) => toMissingField(name));
+  }
+
+  /**
+   * 该记录**当前版本**被手工覆盖的用量字段集合（F3-06-T1 读取侧）：audit_logs 的
+   * `record.usage_override` 行反查（留痕即真值来源，不另设存储列）。
+   *
+   * **按版本过滤（评审修复轮 M1）**：record_no 恒为 `HB-YYYYMMDD-001`（duty_date UNIQUE），
+   * 撤回重提/异议重提跨版本共用同一 targetId 且审计只增不删（D-T09）——不过滤会把旧版本的
+   * 覆盖标到已回到自动值的当前版本上（违反 F3-06-T1），且该集合是 TK-16 重算豁免（D-T07）
+   * 的判定依据，误标会导致豁免不该豁免的字段。
+   */
+  private async usageOverrideFieldsOf(recordNo: string, version: number): Promise<Set<string>> {
+    const rows = await this.db
+      .select({ newValue: auditLogs.newValue })
+      .from(auditLogs)
+      .where(and(eq(auditLogs.action, 'record.usage_override'), eq(auditLogs.targetId, recordNo)));
+    const fields = new Set<string>();
+    for (const r of rows) {
+      const nv = r.newValue;
+      if (nv && typeof nv === 'object' && 'field' in nv && 'version' in nv) {
+        if (Number((nv as { version: unknown }).version) === version) {
+          fields.add(String((nv as { field: unknown }).field));
+        }
+      }
+    }
+    return fields;
+  }
+
+  /**
+   * 用量列计算（TK-13，契约 §4 第 3 步的单一落点）：四类口径全部消费 shared calc.ts 同一
+   * 纯函数（与 h5 实时预览同源，杜绝两端各算一套）。当前值 getter 读提交 payload 原始值
+   * （第 1 步校验已保证可解析），上一班 getter 读相邻班次记录行（adjacentPrevRow，D-T17）。
+   * 无法计算（上一班缺失/读数缺）→ 列置 null 固化，不拦提交（用量列非必填；补录随 TK-14）。
+   * 返回 `auto` 供覆盖协议回填审计 oldValue（覆盖前服务端算出的自动值）。
+   *
+   * **列容量护栏（评审修复轮 L3）**：两线读数各自合法但差值**之和**可超 DECIMAL(12,1) 上限
+   * （与「服务端未校验直接入库 → 500」同族）——超容量的用量列置 null 并记 error 日志，
+   * 不送 MySQL（严格模式下 DECIMAL 溢出会 1264 → 500）。
+   */
+  private computeUsageValues(
+    sections: Readonly<Partial<Record<RecordFieldName, unknown>>>,
+    prevRow: typeof records.$inferSelect | null,
+  ): {
+    values: Record<string, string | null>;
+    auto: Partial<Record<UsageFieldName, number>>;
+  } {
+    const cur: FieldValueGetter = (name) => sections[name] ?? null;
+    const prev: FieldValueGetter = prevRow
+      ? (name) => {
+          const key = recordKeyOf(name, this.logger);
+          return key ? ((prevRow[key as keyof typeof prevRow] as unknown) ?? null) : null;
+        }
+      : () => null;
+    const water = waterDayUseOf(cur, prev);
+    const e = eDayUseOf(cur, prev);
+    const gas = gasDayUseOf(cur, prev);
+    const lo = loDayUseOf(cur);
+    // 列容量护栏：|计算值| 超列上限 → null（不入库），而非让 MySQL 严格模式报 500
+    const capped = (field: UsageFieldName, n: number): string | null => {
+      const max = numericMaxOf(field);
+      if (max !== null && Math.abs(n) > max) {
+        this.logger.error(
+          `用量计算值超列容量：${field}=${n} 超出 DECIMAL 上限 ${max}，该列置 null 不入库`,
+        );
+        return null;
+      }
+      return String(roundToScaleOf(field, n));
+    };
+    const waterV = water === null ? null : capped('water_use', water);
+    const eV = e === null ? null : capped('e_use', e.total);
+    const gasV = gas === null ? null : capped('gas_use', gas.total);
+    const loV = lo === null ? null : capped('lo_day_use', lo);
+    return {
+      values: {
+        waterUse: waterV,
+        eUse: eV,
+        gasUse: gasV,
+        loDayUse: loV,
+      },
+      auto: {
+        ...(waterV === null ? {} : { water_use: Number(waterV) }),
+        ...(eV === null ? {} : { e_use: Number(eV) }),
+        ...(gasV === null ? {} : { gas_use: Number(gasV) }),
+        ...(loV === null ? {} : { lo_day_use: Number(loV) }),
+      },
+    };
+  }
+
+  /**
+   * 用量覆盖项**纯校验**（评审修复轮 M3/L4 拆分）：不依赖上一班与自动值，preview 与 submit
+   * 消费同一函数，消除「预览全就绪、提交却 400」的不对称（TK-12 评审 L4 同纪律）。
+   *
+   * 规则：合法键集 shared `USAGE_FIELDS`；同一字段重复上送 → 越界点名（多行审计失真，
+   * L4）；`reason` 空白 → missing 点名该用量字段（F3-06-T2 服务端强制，非仅前端）；
+   * `reason` 超长（audit_logs.reason varchar(200)）与 `receiver_change_reason` 超长同口径
+   * 以字段字典名义点名（评审修复轮 M4：不再误用「不支持的用量覆盖字段」）；值须为十进制
+   * 字面量且不超列精度上限（numericMaxOf），否则越界点名。
+   */
+  private validateUsageOverrides(input: readonly UsageOverridePayload[]): {
+    missing: MissingField[];
+    outOfRange: MissingField[];
+    valid: Array<{ field: UsageFieldName; value: number; reason: string }>;
+  } {
+    const missing: MissingField[] = [];
+    const outOfRange: MissingField[] = [];
+    const valid: Array<{ field: UsageFieldName; value: number; reason: string }> = [];
+    const seen = new Set<UsageFieldName>();
+    for (const o of input) {
+      if (!USAGE_FIELDS.includes(o.field)) {
+        outOfRange.push(USAGE_OVERRIDE_BAD_FIELD(String(o.field)));
+        continue;
+      }
+      const field = o.field as UsageFieldName;
+      if (seen.has(field)) {
+        outOfRange.push(toMissingField(field));
+        continue;
+      }
+      seen.add(field);
+      const reason = typeof o.reason === 'string' ? o.reason.trim() : '';
+      if (reason === '') {
+        missing.push(toMissingField(field));
+        continue;
+      }
+      if (reason.length > 200) {
+        outOfRange.push(toMissingField(field));
+        continue;
+      }
+      const n = parseNumeric(o.value);
+      const max = numericMaxOf(field);
+      if (n === null || n < -Math.abs(max ?? Infinity) || n > (max ?? Infinity)) {
+        outOfRange.push(toMissingField(field));
+        continue;
+      }
+      valid.push({ field, value: n, reason });
+    }
+    return { missing, outOfRange, valid };
+  }
+
+  /**
+   * 用量覆盖项应用（submit 专用）：在服务端自动值之上改写（按列小数位取整，
+   * roundToScaleOf）并产出留痕清单（写 audit_logs.reason，F3-04-T2「原因留痕；修正值固化」）。
+   */
+  private applyUsageOverrides(
+    valid: ReadonlyArray<{ field: UsageFieldName; value: number; reason: string }>,
+    auto: Readonly<Partial<Record<UsageFieldName, number>>>,
+  ): {
+    values: Record<string, string>;
+    applied: Array<{ field: UsageFieldName; auto: number | null; value: string; reason: string }>;
+  } {
+    const values: Record<string, string> = {};
+    const applied = valid.map(({ field, value, reason }) => {
+      const v = String(roundToScaleOf(field, value));
+      values[recordKeyOf(field, this.logger) ?? field] = v;
+      return { field, auto: auto[field] ?? null, value: v, reason };
+    });
+    return { values, applied };
   }
 
   /**
@@ -449,6 +647,12 @@ export class RecordsService {
     if (receiverChanged && !isFilledValue(payload.receiver_change_reason)) {
       result.missing.push(toMissingField('receiver_change_reason'));
     }
+    // 用量覆盖同口径预检（评审修复轮 M3）：与 submit 消费同一 validateUsageOverrides，
+    // 消除「预览全就绪、提交却 400」的不对称（TK-12 评审 L4 同纪律）；不在此做上一班取数
+    // 与计算（预览只读不落库，计算结果也不属未填/异常两张清单的范畴）
+    const overrideCheck = this.validateUsageOverrides(payload?.usage_overrides ?? []);
+    result.missing.push(...overrideCheck.missing);
+    result.outOfRange.push(...overrideCheck.outOfRange);
 
     const body = buildValidationError(result);
     return {
@@ -461,10 +665,11 @@ export class RecordsService {
   /**
    * POST /records/today/submit（契约 §4 提交协议；F2-01/DATA-09/10/13，含 TK-09/10/11 挂账复验）。
    *
-   * 步骤对照契约 §4：① 必填/范围校验 → 400（C-09 结构）；② 防呆判定随 TK-14 接入
-   * （confirmations/duty_guard_confirm 本阶段仅接收不判定）；③ 用量固化随 TK-13（先置 NULL）；
+   * 步骤对照契约 §4：① 必填/范围校验 → 400（C-09 结构，含用量覆盖同口径预检，评审修复轮 M3）；
+   * ② 防呆判定随 TK-14 接入（confirmations/duty_guard_confirm 本阶段仅接收不判定）；
+   * ③ 用量固化已随 TK-13 落地（服务端计算 + 覆盖协议，评审修复轮 L1 起在校验与 409 判定之后执行）；
    * ④ 标红确认行（alerts）随 TK-17/TK-22 落地；⑤ 转 submitted、submitted_at=服务端收到时刻、
-   * 生成 record_no；⑥ 写审计（record.submit + 接班人修改原因留痕）。
+   * 生成 record_no；⑥ 写审计（record.submit + record.usage_override + 接班人修改原因留痕）。
    */
   async submit(user: SessionUser, payload: SubmitPayloadDto): Promise<SubmitResultDto> {
     const { dutyDate } = await this.resolveDutyDate();
@@ -514,6 +719,13 @@ export class RecordsService {
     if (reason.length > (FIELD_LENGTHS.receiver_change_reason ?? 200)) {
       result.outOfRange.push(toMissingField('receiver_change_reason'));
     }
+
+    // 覆盖项纯校验先行（评审修复轮 M3/L1 拆分）：与 preview 同一函数、并入同一张 400 清单，
+    // 且不依赖上一班取数——校验不通过就不白跑相邻班次查询与四类计算
+    const overrideCheck = this.validateUsageOverrides(payload?.usage_overrides ?? []);
+    result.missing.push(...overrideCheck.missing);
+    result.outOfRange.push(...overrideCheck.outOfRange);
+
     const body = buildValidationError(result);
     if (body) {
       throw new ApiException(body.code, body.message, {
@@ -531,6 +743,15 @@ export class RecordsService {
     if (existing && existing.status !== 'draft') {
       throw new ApiException('RECORD_EXISTS', '当日记录已提交，不可重复提交');
     }
+
+    // 第 ③ 步（TK-13，契约 §4；评审修复轮 L1：移到校验/409 判定之后，无效与重复提交不白跑）：
+    // 用量由服务端计算固化——上一班取数与 GET /prev 同源（adjacentPrevRow，D-T17）；
+    // 上一班缺失 → 用量列留 null（F3-07 补录随 TK-14）；手工覆盖（F3-04/F3-06，已过
+    // validateUsageOverrides）在计算值之上改写。
+    const prevRow = await this.adjacentPrevRow(dutyDate);
+    const usage = this.computeUsageValues(sections, prevRow);
+    const overrides = this.applyUsageOverrides(overrideCheck.valid, usage.auto);
+    Object.assign(usage.values, overrides.values);
 
     const receiverId = receiverChanged
       ? (payload.receiver_id as number)
@@ -550,6 +771,7 @@ export class RecordsService {
           .set({
             ...SNAPSHOT_NULL_DEFAULTS,
             ...values,
+            ...usage.values,
             submitterId: user.id,
             receiverId,
             receiverChangeReason: receiverChanged ? reason : null,
@@ -570,6 +792,7 @@ export class RecordsService {
           submittedAt,
           version,
           ...values,
+          ...usage.values,
         });
         recordId = inserted[0].insertId;
       }
@@ -585,6 +808,21 @@ export class RecordsService {
           : null,
         newValue: { receiver_id: receiverId, receiver_changed: receiverChanged, version },
       });
+
+      // 用量覆盖留痕（F3-04-T2/F3-06）：逐覆盖项一行，原因记 reason 列（技术方案 §5.5），
+      // oldValue 记覆盖前服务端算出的自动值——留痕即 F3-06-T1「人工值」标识的数据源，
+      // 亦为 TK-16 重算豁免（师傅手工覆盖过的值不被重算覆盖）的判定依据
+      for (const o of overrides.applied) {
+        await tx.insert(auditLogs).values({
+          actorId: user.id,
+          action: 'record.usage_override',
+          targetType: 'record',
+          targetId: recordNo,
+          oldValue: { field: o.field, auto_value: o.auto },
+          newValue: { field: o.field, value: o.value, version },
+          reason: o.reason,
+        });
+      }
       return recordId;
     });
 
@@ -613,6 +851,7 @@ export class RecordsService {
   private buildCards(
     spotRows: ReadonlyArray<{ id: number; name: string; sortNo: number }>,
     recordRow: Record<string, unknown> | undefined,
+    manualFields: ReadonlySet<string> = new Set<string>(),
   ): CardDto[] {
     const cards: CardDto[] = [];
     const matched = new Set<string>();
@@ -628,7 +867,7 @@ export class RecordsService {
       }
       matched.add(spot.name);
       for (const def of defs) {
-        cards.push(this.buildCard(def, spot, recordRow));
+        cards.push(this.buildCard(def, spot, recordRow, manualFields));
       }
     }
 
@@ -648,6 +887,7 @@ export class RecordsService {
     def: CardDef,
     spot: { id: number; name: string; sortNo: number },
     recordRow: Record<string, unknown> | undefined,
+    manualFields: ReadonlySet<string>,
   ): CardDto {
     // 动态必填的取值函数：从 records 行按字段名取值（未存列/无记录 → null）
     const getValue: FieldValueGetter = (fieldName) => {
@@ -665,6 +905,8 @@ export class RecordsService {
         filled: isFilledValue(value),
         abnormal: isAbnormal(name, value),
         value,
+        // 用量字段被师傅手工覆盖时标人工值（F3-06-T1）；其余字段恒 undefined（自动）
+        manual: manualFields.has(name) || undefined,
       };
     });
 
