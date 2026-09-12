@@ -522,7 +522,7 @@ describe('TK-12 在线提交与预览（F1-10/F2-01/F1-08/DATA-01/05/07/09/10/13
       await cleanRecord();
     });
 
-    it('用量列不信任客户端传值（契约 §4 第 3 步；TK-13 计算引擎落地前置 NULL）', async () => {
+    it('用量列不信任客户端传值，由服务端按上一班（种子 D-1）计算固化（TK-13，契约 §4 第 3 步）', async () => {
       await request(server)
         .post(SUBMIT_API)
         .set('Cookie', masterCookie)
@@ -531,10 +531,15 @@ describe('TK-12 在线提交与预览（F1-10/F2-01/F1-08/DATA-01/05/07/09/10/13
         )
         .expect(201);
       const row = await recordRow();
-      expect(row?.waterUse).toBeNull();
-      expect(row?.eUse).toBeNull();
-      expect(row?.gasUse).toBeNull();
-      expect(row?.loDayUse).toBeNull();
+      // 诱饵传值 999 全部不采信；服务端按种子 D-1（水 12250 / 电 53420+43150 / 气 310+210）
+      // 与本班 fullSections 基准值计算（黄金期望口径同 records-usage.spec.ts）：
+      // 水子 100−12250=−12150；电 (200−53420)+(150−43150)=−96220；气 (310−300)+(210−250)=−30；
+      // 液氧 tank 1 在用罐 5000.00−5000.00=0。负差不夹逼（换表/充气真实场景原样固化，
+      // 防呆确认与覆盖留痕分属 TK-14/F3-06）
+      expect(Number(row?.waterUse)).toBe(-12150);
+      expect(Number(row?.eUse)).toBe(-96220);
+      expect(Number(row?.gasUse)).toBe(-30);
+      expect(Number(row?.loDayUse)).toBe(0);
       await cleanRecord();
     });
   });
