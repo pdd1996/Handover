@@ -1,5 +1,11 @@
-import { Controller, Get, UseGuards } from '@nestjs/common';
-import type { PrevDto, TodayDto } from '@handover/shared';
+import { Body, Controller, Get, Post, UseGuards } from '@nestjs/common';
+import type {
+  PrevDto,
+  PreviewDto,
+  SubmitPayloadDto,
+  SubmitResultDto,
+  TodayDto,
+} from '@handover/shared';
 import { CurrentUser, Roles } from '../auth/decorators';
 import { RolesGuard } from '../auth/roles.guard';
 import { SessionGuard } from '../auth/session.guard';
@@ -51,5 +57,38 @@ export class RecordsController {
   @Roles('master', 'chief')
   prev(): Promise<PrevDto> {
     return this.records.prev();
+  }
+
+  /**
+   * POST /api/v1/records/today/preview —— 提交前汇总预览（TK-12，F1-10「未填项、异常项一目了然」）。
+   *
+   * 请求体同 submit（契约 §4），返回未填项与异常项两张清单（结构同契约 §2 missing_fields，
+   * C-09 逐条点名 + 锚点跳转）；**只读不落库**，客户端据此弹窗展示、点击定位。
+   *
+   * 角色：写链路辅助端点，与 submit 同取 `master`（契约订正 4「chief：全部 + 配置」的
+   * 回写仅限只读接口；提交链路是否覆盖 chief 待后台权限任务落地时按同一口径回写）。
+   */
+  @Post('today/preview')
+  @UseGuards(SessionGuard, RolesGuard)
+  @Roles('master')
+  preview(@Body() payload: SubmitPayloadDto): Promise<PreviewDto> {
+    return this.records.preview(payload);
+  }
+
+  /**
+   * POST /api/v1/records/today/submit —— 正式提交（TK-12，契约 §4 提交协议；F2-01/DATA-09/10/13）。
+   *
+   * 处理顺序与挂账对照见 RecordsService.submit 注：校验 →（防呆 TK-14）→（用量固化 TK-13）
+   * → 转 submitted + record_no + submitted_at 服务端时刻 → 审计留痕（含接班人修改原因）。
+   * 角色：`master`（提交是师傅端写操作，契约 §3.2 角色列原样，不适用 chief 只读回写口径）。
+   */
+  @Post('today/submit')
+  @UseGuards(SessionGuard, RolesGuard)
+  @Roles('master')
+  submit(
+    @CurrentUser() user: SessionUser,
+    @Body() payload: SubmitPayloadDto,
+  ): Promise<SubmitResultDto> {
+    return this.records.submit(user, payload);
   }
 }

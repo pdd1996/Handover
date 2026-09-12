@@ -4,29 +4,112 @@ import { getTableConfig } from 'drizzle-orm/mysql-core';
 import {
   FIELDS,
   FIELD_BY_NAME,
+  FIELD_LENGTHS,
+  FIELD_NAMES,
   SECTION_BY_NO,
   TASK_CARDS,
+  buildValidationError,
   isFilledValue,
   isRequiredField,
+  localMeasuredAt,
+  parseNumeric,
+  toMissingField,
+  validateFields,
   type BadgeDto,
   type CardDef,
   type CardDto,
   type CardFieldStateDto,
   type FieldValueGetter,
+  type MissingField,
   type PrevDto,
   type PrevRecordDto,
+  type PreviewDto,
   type RecordFieldName,
   type SectionNo,
   type SectionStateDto,
+  type SubmitPayloadDto,
+  type SubmitResultDto,
   type TodayDto,
 } from '@handover/shared';
 import type { SessionUser } from '../auth/auth.service';
+import { ApiException } from '../common/api-error';
 import { DB, type Db } from '../db/db.module';
-import { configs, records, spots } from '../db/schema';
-import { DEFAULT_SHIFT_START, minusOneDay, shiftDutyDate } from './duty-date';
+import { auditLogs, configs, records, schedules, spots, users } from '../db/schema';
+import { DEFAULT_SHIFT_START, minusOneDay, plusOneDay, shiftDutyDate } from './duty-date';
 
 /** 状态类字段取此值即为"异常"（PRD §6.2：Phase 1 无独立预警，"预警项"指表单级标红项；与 cards.ts STATUS_BAD 同口径） */
 const ABNORMAL_STATUS = 'bad';
+
+/**
+ * 枚举/状态列合法值白名单（与 schema.ts mysqlEnum 逐项同源抄录，enums.ts 为类型来源）。
+ * 提交侧不校验候选成员性的仅是**配置驱动清单**（hvac_locs/boiler_list，契约 §3.7）；
+ * schema 枚举列的越值会直接在 MySQL 层报错（500），故在此拦为 400 点名（VALIDATION_OUT_OF_RANGE）。
+ */
+const ENUM_VALUES: Readonly<Partial<Record<RecordFieldName, readonly (string | number)[]>>> = {
+  hp_status: ['ok', 'bad'],
+  neg_status: ['ok', 'bad'],
+  air_status: ['ok', 'bad'],
+  boiler_status: ['ok', 'bad'],
+  coolroom_status: ['ok', 'bad'],
+  hvac_status: ['ok', 'bad'],
+  boiler_run: ['run', 'stop'],
+  cool_run: ['run', 'stop'],
+  p1_level: ['ok', 'high', 'low'],
+  p3_level: ['ok', 'high', 'low'],
+  tank_in_use: [1, 2],
+};
+
+/** INT 列（瓶库五项，schema tinyint/int）：落库前转 number，decimal 列以字符串保精度 */
+const INT_COLUMNS: ReadonlySet<RecordFieldName> = new Set<RecordFieldName>([
+  'b40',
+  'b10',
+  'b6',
+  'b_co2',
+  'b_pulm',
+]);
+
+/** 本地时间戳字面量格式（DATA-13 测量时刻随 payload 上送的形态，calc.ts localMeasuredAt）；
+ * 分域捕获组（TK-12 评审修复轮 M3：原 \d 宽松正则放过 '2026-13-45 99:99:99'，MySQL 拒绝 → 500） */
+const MEASURED_AT_PATTERN =
+  /^(\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01]) ([01]\d|2[0-3]):([0-5]\d):([0-5]\d)$/;
+
+/**
+ * 测量时刻合法性（TK-12 评审修复轮 M3）：分域正则 + **日历有效性**（Date 构造往返比对，
+ * 拦住 02-30、04-31 等分域正则拦不住的非法日期）。非法值置 NULL（不拦提交、不覆盖为
+ * 服务端时刻——本机时刻是唯一权威，无效即无从记录，D-P12）。
+ */
+function isValidMeasuredAt(s: string): boolean {
+  const g = MEASURED_AT_PATTERN.exec(s);
+  if (!g) return false;
+  // noUncheckedIndexedAccess 下捕获组为 string|undefined；正则命中时组必存在，?? NaN 仅安抚类型
+  const num = (v: string | undefined): number => Number(v ?? NaN);
+  const y = num(g[1]);
+  const mo = num(g[2]);
+  const d = num(g[3]);
+  const h = num(g[4]);
+  const mi = num(g[5]);
+  const sec = num(g[6]);
+  const date = new Date(y, mo - 1, d, h, mi, sec);
+  return (
+    date.getFullYear() === y &&
+    date.getMonth() === mo - 1 &&
+    date.getDate() === d &&
+    date.getHours() === h &&
+    date.getMinutes() === mi &&
+    date.getSeconds() === sec
+  );
+}
+
+/**
+ * record_no 生成（TK-12 评审修复轮 L5 抽为纯函数供黄金值哨兵）：格式钉死自技术方案 §4.2
+ * DDL 注释原文示例 'HB-20260827-001'；duty_date 唯一（F1-01）→ 每班次恒 -001。
+ */
+export function recordNoOf(dutyDate: string): string {
+  return `HB-${dutyDate.replaceAll('-', '')}-001`;
+}
+
+/** 用量列（契约 §4 第 3 步：服务端计算固化、客户端传值不信任）——TK-13 计算引擎落地前先置 NULL */
+const SERVER_CALCULATED_KEYS = ['waterUse', 'eUse', 'gasUse', 'loDayUse'] as const;
 
 /** records 表的 DB 列名集合（用于识别字典里的派生字段，如 lo_night_use 非存储列） */
 const RECORD_DB_COLUMNS: ReadonlySet<string> = new Set(
@@ -40,6 +123,20 @@ const RECORD_TS_KEYS: ReadonlySet<string> = new Set(Object.keys(records));
 function toTsKey(columnName: string): string {
   return columnName.replace(/_([a-z0-9])/g, (_, c: string) => c.toUpperCase());
 }
+
+/**
+ * 更新路径的快照兑底（TK-12 评审修复轮 M5）：字典内 section ≥1 的全部 records 存储列 → null。
+ * 撤回重提（draft 行）走 update 时未上送的列一律清空——提交 payload 是「十板块全部字段」的
+ * 全量快照语义（契约 §4），未上送即未填；否则本机清空的字段会以服务端旧值残留（实证：
+ * draft 行 energy_note 重提不送上送仍残留）。这正是台账增补 #16 只给停机三项单点打补丁的
+ * 同源缺口的一般化；h5 侧另有「草稿 ?? 服务端值」合并视图配合（清空字段显式上送 null）。
+ */
+const SNAPSHOT_NULL_DEFAULTS: Readonly<Record<string, null>> = Object.fromEntries(
+  FIELDS.filter((f) => f.section >= 1)
+    .map((f) => toTsKey(f.name))
+    .filter((key) => RECORD_TS_KEYS.has(key))
+    .map((key) => [key, null]),
+);
 
 /**
  * 取字段在 records 行上的 TS 属性名。
@@ -115,8 +212,8 @@ export class RecordsService {
   async today(user: SessionUser, now: Date = new Date()): Promise<TodayDto> {
     const { dutyDate, shiftStart } = await this.resolveDutyDate(now);
 
-    // 两路并发取数：当日记录、点位字典（卡片由它驱动）；当日排班取数（接班人带出）随 TK-12 落地后接入
-    const [recordRows, spotRows] = await Promise.all([
+    // 三路并发取数：当日记录、点位字典（卡片由它驱动）、次日排班（接班人带出，F2-01/DATA-10）
+    const [recordRows, spotRows, scheduled] = await Promise.all([
       this.db
         .select({
           id: records.id,
@@ -134,6 +231,7 @@ export class RecordsService {
         .from(spots)
         .where(eq(spots.status, 'active'))
         .orderBy(asc(spots.sortNo)),
+      this.scheduledReceiverOf(dutyDate),
     ]);
 
     const recordRow = recordRows[0]?.row;
@@ -156,7 +254,7 @@ export class RecordsService {
         : null,
       pending_sync: false,
       submitter: { id: user.id, real_name: user.realName },
-      receiver: null,
+      receiver: scheduled ? { id: scheduled.id, real_name: scheduled.realName } : null,
       progress,
       sections,
       cards,
@@ -215,6 +313,292 @@ export class RecordsService {
       submitted_at: row.submittedAt,
       version: row.version,
       readings,
+    };
+  }
+
+  // ── 提交协议（TK-12：契约 §3.2 preview/submit、§4；F1-10、F2-01、DATA-05/07/09/10/13）─────
+
+  /**
+   * 接班人带出（F2-01/DATA-10）：**次日排班人**——排班表是「日期→当日值班人」语义，
+   * 本班交接的接收方是下一个班次的人（F2-01-T1 判据「receiver=排班表次日人」）。
+   * 日期推算用 duty-date.ts plusOneDay（勿另写日历算术，防漂移纪律同 minusOneDay 注）。
+   */
+  private async scheduledReceiverOf(
+    dutyDate: string,
+  ): Promise<{ id: number; realName: string } | null> {
+    const rows = await this.db
+      .select({ id: users.id, realName: users.realName })
+      .from(schedules)
+      .innerJoin(users, eq(schedules.userId, users.id))
+      .where(eq(schedules.dutyDate, plusOneDay(dutyDate)))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
+  /**
+   * 提交侧校验入口（契约 §4 第 1 步）：shared validateFields 同一引擎（F1-08），
+   * 字段清单排除 `receiver_change_reason`——它是**条件必填**（DATA-10：仅修改接班人时必填），
+   * 依赖接班人上下文，不属静态字段引擎的判定范围，由调用方按带出值判定后追加点名。
+   */
+  private validateForSubmit(sections: Readonly<Partial<Record<RecordFieldName, unknown>>>): {
+    missing: MissingField[];
+    outOfRange: MissingField[];
+  } {
+    const get: FieldValueGetter = (name) => sections[name] ?? null;
+    const result = validateFields(
+      FIELD_NAMES.filter((name) => name !== 'receiver_change_reason'),
+      get,
+    );
+    // 拷为可变副本：接班人修改原因的条件点名（DATA-10）由调用方追加
+    return { missing: [...result.missing], outOfRange: [...result.outOfRange] };
+  }
+
+  /** 异常项清单（F1-10「异常项一目了然」）：状态字段选「异常」的点名，不拦提交（PRD §6.2） */
+  private abnormalFieldsOf(
+    sections: Readonly<Partial<Record<RecordFieldName, unknown>>>,
+  ): MissingField[] {
+    return FIELD_NAMES.filter(
+      (name) => FIELD_BY_NAME[name].kind === 'status' && sections[name] === ABNORMAL_STATUS,
+    ).map((name) => toMissingField(name));
+  }
+
+  /**
+   * payload.sections → records 列值（TS 键）。职责边界：
+   * - 字典外键忽略；派生列（lo_night_use 等非存储列）经 recordKeyOf 判定后不落库；
+   * - 数值：parseNumeric（十进制字面量）复验后，decimal 列存字符串保精度、INT 列转 number；
+   * - 枚举/状态：白名单越值 → outOfRange 点名（防 MySQL 500）；tank_in_use 转 number；
+   * - 多选 hvac_locs：仅接受数组，JSON 列**原样数组落库**（DATA-07-T1；不做候选成员性校验，
+   *   契约 §3.7——离线降级候选不得变 400）；
+   * - 时间：lo_measured_am/pm 仅接受 `YYYY-MM-DD HH:mm:ss` 本地时间戳，**原样落库不覆盖**
+   *   （DATA-13-T2/D-P12）；格式非法置 NULL（客户端时钟异常不拦截提交）；
+   * - 停机强制清列（DATA-05/台账增补 #16）：boiler_run='stop' → 三项停机列强制 NULL
+   *   （落库第二道防线：撤回重提/异议重提/离线重放时服务端旧值不因本机草稿为空而复活）；
+   * - 用量列恒置 NULL（契约 §4 第 3 步不信任客户端传值；TK-13 计算引擎落地后在此固化）。
+   */
+  private normalizeSections(sections: Readonly<Partial<Record<RecordFieldName, unknown>>>): {
+    values: Record<string, unknown>;
+    outOfRange: MissingField[];
+  } {
+    const values: Record<string, unknown> = {};
+    const outOfRange: MissingField[] = [];
+
+    for (const [name, raw] of Object.entries(sections)) {
+      const def = FIELD_BY_NAME[name as RecordFieldName];
+      if (!def || !isFilledValue(raw)) continue;
+      // 板块 0（基础信息）全部为记录级字段：duty_date/submitted_at/submitter_id 以服务端为准
+      // （C-08/DATA-09；接收随 payload 上送也不得覆盖），receiver_id/receiver_change_reason
+      // 由 submit 流程单独处理——payload sections 一律不落基础信息列
+      if (def.section === 0) continue;
+      const key = recordKeyOf(name, this.logger);
+      if (!key) continue; // 派生列（lo_night_use）不落库
+
+      if (def.kind === 'number') {
+        const n = parseNumeric(raw);
+        if (n === null) {
+          outOfRange.push(toMissingField(name as RecordFieldName));
+          continue;
+        }
+        values[key] = INT_COLUMNS.has(name as RecordFieldName) ? Math.trunc(n) : String(n);
+      } else if (def.kind === 'enum' || def.kind === 'status') {
+        const allowed = ENUM_VALUES[name as RecordFieldName];
+        if (allowed && !allowed.includes(raw as string | number)) {
+          outOfRange.push(toMissingField(name as RecordFieldName));
+          continue;
+        }
+        values[key] = name === 'tank_in_use' ? Number(raw) : raw;
+      } else if (def.kind === 'multi') {
+        if (!Array.isArray(raw)) {
+          outOfRange.push(toMissingField(name as RecordFieldName));
+          continue;
+        }
+        values[key] = raw;
+      } else if (def.kind === 'time') {
+        const s = typeof raw === 'string' ? raw.trim() : '';
+        // M3：分域正则 + 日历有效性（isValidMeasuredAt），非法置 NULL 而非把垃圾送进 MySQL（500）
+        values[key] = isValidMeasuredAt(s) ? s : null;
+      } else {
+        values[key] = typeof raw === 'string' ? raw.trim() : raw;
+      }
+    }
+
+    if (values['boilerRun'] === 'stop') {
+      values['boilerNo'] = null;
+      values['supplyTemp'] = null;
+      values['returnTemp'] = null;
+    }
+    for (const key of SERVER_CALCULATED_KEYS) values[key] = null;
+
+    return { values, outOfRange };
+  }
+
+  /** POST /records/today/preview（F1-10）：未填项与异常项汇总，结构与契约 §2 同构 */
+  async preview(payload: SubmitPayloadDto): Promise<PreviewDto> {
+    const { dutyDate } = await this.resolveDutyDate();
+    const sections = (payload?.sections ?? {}) as Readonly<
+      Partial<Record<RecordFieldName, unknown>>
+    >;
+
+    const result = this.validateForSubmit(sections);
+    // 评审 L4：与 submit 同口径——normalize 的枚举/多选/长度越值在预览即点名，
+    // 消除「预览全就绪、提交却 400」的不对称；并入 outOfRange 保持缺失优先选码
+    result.outOfRange.push(...this.normalizeSections(sections).outOfRange);
+    // 接班人修改原因条件必填（DATA-10；评审 M4 保守口径：无带出基线时显式指定亦视为修改）
+    const scheduled = await this.scheduledReceiverOf(dutyDate);
+    const receiverChanged =
+      payload?.receiver_id != null && (scheduled === null || payload.receiver_id !== scheduled.id);
+    if (receiverChanged && !isFilledValue(payload.receiver_change_reason)) {
+      result.missing.push(toMissingField('receiver_change_reason'));
+    }
+
+    const body = buildValidationError(result);
+    return {
+      duty_date: dutyDate,
+      missing_fields: body ? body.missing_fields : [],
+      abnormal_fields: this.abnormalFieldsOf(sections),
+    };
+  }
+
+  /**
+   * POST /records/today/submit（契约 §4 提交协议；F2-01/DATA-09/10/13，含 TK-09/10/11 挂账复验）。
+   *
+   * 步骤对照契约 §4：① 必填/范围校验 → 400（C-09 结构）；② 防呆判定随 TK-14 接入
+   * （confirmations/duty_guard_confirm 本阶段仅接收不判定）；③ 用量固化随 TK-13（先置 NULL）；
+   * ④ 标红确认行（alerts）随 TK-17/TK-22 落地；⑤ 转 submitted、submitted_at=服务端收到时刻、
+   * 生成 record_no；⑥ 写审计（record.submit + 接班人修改原因留痕）。
+   */
+  async submit(user: SessionUser, payload: SubmitPayloadDto): Promise<SubmitResultDto> {
+    const { dutyDate } = await this.resolveDutyDate();
+    const sections = (payload?.sections ?? {}) as Readonly<
+      Partial<Record<RecordFieldName, unknown>>
+    >;
+    const scheduled = await this.scheduledReceiverOf(dutyDate);
+    const reason =
+      typeof payload?.receiver_change_reason === 'string'
+        ? payload.receiver_change_reason.trim()
+        : '';
+    const receiverProvided = payload?.receiver_id != null;
+
+    // 第 0 步（TK-12 评审修复轮 M4）：receiver_id 显式上送时**一律校验存在性**——原实现只在
+    // 「修改」分支查，无次日排班基线时伪造 id 会绕过留痕直撞 FK（500）；有基线时提前拦也
+    // 免得先报「原因缺失」掩盖真正的 id 错误。合法 id 的姓名缓存供审计与响应回显
+    let receiverName: string | null = scheduled?.realName ?? null;
+    if (receiverProvided) {
+      const target = await this.db
+        .select({ id: users.id, realName: users.realName })
+        .from(users)
+        .where(eq(users.id, payload.receiver_id as number))
+        .limit(1);
+      if (!target[0]) {
+        throw new ApiException('VALIDATION_MISSING_FIELDS', '接班人不存在，请核对后重试', {
+          missingFields: [toMissingField('receiver_id')],
+        });
+      }
+      receiverName = target[0].realName;
+    }
+
+    // 接班人口径（DATA-10；评审 M4 定案的保守口径）：与次日排班带出值不同，**或无带出基线时
+    // 显式指定**（由空改为有人同样是改），均视为修改 → 原因必填；省略 receiver_id = 自动带出
+    const receiverChanged =
+      receiverProvided && (scheduled === null || payload.receiver_id !== scheduled.id);
+
+    // 第 1 步：必填/范围校验 → 400（C-09：逐条点名 + 锚点）。评审 L4：normalize 的枚举/多选
+    // /长度越值并入同一张清单（原「预览全就绪、提交却 400」的不对称由此消除）；并入
+    // outOfRange 让 buildValidationError 按「缺失优先」选码（纯越界仍报 VALIDATION_OUT_OF_RANGE）；
+    // 原因超长走越界（FIELD_LENGTHS.receiver_change_reason，静态引擎不含 section 0）
+    const result = this.validateForSubmit(sections);
+    const { values, outOfRange } = this.normalizeSections(sections);
+    result.outOfRange.push(...outOfRange);
+    if (receiverChanged && reason === '') {
+      result.missing.push(toMissingField('receiver_change_reason'));
+    }
+    if (reason.length > (FIELD_LENGTHS.receiver_change_reason ?? 200)) {
+      result.outOfRange.push(toMissingField('receiver_change_reason'));
+    }
+    const body = buildValidationError(result);
+    if (body) {
+      throw new ApiException(body.code, body.message, {
+        missingFields: [...body.missing_fields],
+      });
+    }
+
+    // 当日唯一（F1-01）：已存在非 draft 行 → 409 RECORD_EXISTS；draft（撤回重提）→ 更新 + version+1
+    const existingRows = await this.db
+      .select({ id: records.id, version: records.version, status: records.status })
+      .from(records)
+      .where(eq(records.dutyDate, dutyDate))
+      .limit(1);
+    const existing = existingRows[0];
+    if (existing && existing.status !== 'draft') {
+      throw new ApiException('RECORD_EXISTS', '当日记录已提交，不可重复提交');
+    }
+
+    const receiverId = receiverChanged
+      ? (payload.receiver_id as number)
+      : (scheduled?.id ?? (receiverProvided ? (payload.receiver_id as number) : null));
+    const recordNo = recordNoOf(dutyDate);
+    const submittedAt = localMeasuredAt(); // DATA-09：服务端收到时刻（离线场景下即同步成功时刻）
+    const version = existing ? existing.version + 1 : 1;
+
+    // 第 ⑤⑥ 步同事务：记录行（新建或撤回重提更新）+ 审计
+    const saved = await this.db.transaction(async (tx) => {
+      let recordId: number;
+      if (existing) {
+        await tx
+          .update(records)
+          // 快照写 NULL（评审 M5）：字典存储列未上送的一律清空，撤回重提不残留服务端旧值；
+          // 提交人/接班人/状态/时刻/版本等记录级字段在后续键显式覆盖
+          .set({
+            ...SNAPSHOT_NULL_DEFAULTS,
+            ...values,
+            submitterId: user.id,
+            receiverId,
+            receiverChangeReason: receiverChanged ? reason : null,
+            status: 'submitted',
+            submittedAt,
+            version,
+          })
+          .where(eq(records.id, existing.id));
+        recordId = existing.id;
+      } else {
+        const inserted = await tx.insert(records).values({
+          recordNo,
+          dutyDate,
+          submitterId: user.id,
+          receiverId,
+          receiverChangeReason: receiverChanged ? reason : null,
+          status: 'submitted',
+          submittedAt,
+          version,
+          ...values,
+        });
+        recordId = inserted[0].insertId;
+      }
+
+      // 审计（契约 §5：action=record.submit；接班人修改原因记 reason 列，DATA-10 留痕）
+      await tx.insert(auditLogs).values({
+        actorId: user.id,
+        action: 'record.submit',
+        targetType: 'record',
+        targetId: recordNo,
+        reason: receiverChanged
+          ? `接班人改为 ${receiverName ?? payload.receiver_id}：${reason}`
+          : null,
+        newValue: { receiver_id: receiverId, receiver_changed: receiverChanged, version },
+      });
+      return recordId;
+    });
+
+    return {
+      id: saved,
+      record_no: recordNo,
+      status: 'submitted',
+      version,
+      submitted_at: submittedAt,
+      receiver:
+        receiverId != null
+          ? { id: receiverId, real_name: receiverName ?? String(receiverId) }
+          : null,
+      receiver_changed: receiverChanged,
     };
   }
 

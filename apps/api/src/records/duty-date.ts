@@ -32,6 +32,16 @@ export function minusOneDay(date: string): string {
 }
 
 /**
+ * 当地日历日加一天（与 minusOneDay 同一套 UTC 算法，防漂移纪律同注）。
+ * 导出供接班人带出（TK-12/F2-01：接班人 = **次日**排班人，F2-01-T1 判据「receiver=排班表次日人」）。
+ */
+export function plusOneDay(date: string): string {
+  const t = new Date(`${date}T00:00:00Z`);
+  t.setUTCHours(t.getUTCHours() + 24);
+  return t.toISOString().slice(0, 10);
+}
+
+/**
  * 取指定时区的当地日历日与当日分钟数。
  * 用 `hourCycle: 'h23'` 而非 `hour12: false`——后者在部分 ICU 下把午夜给成 `24:00`，会使分界判定错位。
  */
