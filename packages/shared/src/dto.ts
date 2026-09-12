@@ -14,6 +14,7 @@
 import type { RecordStatus } from './enums';
 import type { RecordFieldName } from './fields';
 import type { SectionNo } from './sections';
+import type { ConfirmationPayload, DutyGuardConfirm, MissingField } from './errors';
 
 // ── 契约 §3.2 GET /records/today（今日交接首页；F1-01、F1-02、F1-03）─────────
 
@@ -157,6 +158,66 @@ export type FormOptionConfigKey = (typeof FORM_OPTION_CONFIG_KEYS)[number];
 export type FormOptionsDto = {
   readonly [K in FormOptionConfigKey]: readonly string[];
 };
+
+// ── 契约 §3.2 / §4 提交协议（TK-12；F1-10、F2-01、DATA-09/10/13）─────────────────
+
+/**
+ * POST /records/today/preview 与 /records/today/submit 的请求体（契约 §4）。
+ *
+ * `sections` 为字段名字典值对（snake_case 列名 → 原值；decimal 传字符串、多选传数组、
+ * 测量时刻传 `YYYY-MM-DD HH:mm:ss` 本地时间戳）。**用量列（*_use）客户端传值不被信任**
+ * （契约 §4 第 3 步：服务端计算固化，TK-13 落地前提交时置 NULL）；
+ * `lo_measured_am/pm` 相反——本机测量时刻即唯一权威（D-P12/契约 §4 补充口径），
+ * 服务端原样落库、不得以同步时刻覆盖（DATA-13-T2）。
+ *
+ * `confirmations[]` / `duty_guard_confirm` 为 TK-14 防呆与 TK-26 排班安全阀的确认载体：
+ * 本阶段服务端仅接收不判定（防呆三则属 TK-14、安全阀属 TK-26），字段先行以稳定契约形状。
+ */
+export interface SubmitPayloadDto {
+  /** 十板块表单值（字段字典内的 records 列名 → 原值；字典外键忽略） */
+  sections: Readonly<Partial<Record<RecordFieldName, unknown>>>;
+  /**
+   * 接班人（DATA-10）：省略 = 按排班自动带出（次日排班人）；与带出值不同即视为修改，
+   * `receiver_change_reason` 转必填（400 点名 section 0）。
+   */
+  receiver_id?: number | null;
+  /** 接班人修改原因（DATA-10：修改必填原因并留痕） */
+  receiver_change_reason?: string | null;
+  /** 防呆确认（TK-14 消费）；本阶段仅接收 */
+  confirmations?: readonly ConfirmationPayload[];
+  /** 排班安全阀确认（TK-26 消费，F6-05）；本阶段仅接收 */
+  duty_guard_confirm?: DutyGuardConfirm;
+}
+
+/**
+ * POST /records/today/preview 响应体（F1-10「提交前汇总预览：未填项、异常项一目了然」）。
+ * 两张清单与契约 §2 `missing_fields[]` 同构（C-09：逐条点名 + 锚点跳转），
+ * 供客户端弹窗展示与点击定位。
+ */
+export interface PreviewDto {
+  /** 班次起始日（C-08，回显供前端互核） */
+  duty_date: string;
+  /** 必填未填（含越界项合并展示，缺失在前；同 submit 400 的口径，契约 §4 第 1 步） */
+  missing_fields: readonly MissingField[];
+  /** 异常项：状态字段选「异常」（'bad'）的清单——预警级标红，不拦提交（PRD §6.2） */
+  abnormal_fields: readonly MissingField[];
+}
+
+/** POST /records/today/submit 响应体（F2-01：生成正式交接单） */
+export interface SubmitResultDto {
+  id: number;
+  /** `HB-YYYYMMDD-001`（技术方案 §4.2 示例格式；duty_date 唯一 → 每班次恒 -001） */
+  record_no: string;
+  /** 提交后恒 'submitted'（技术方案 §5.4 状态机；draft 仅由撤回产生，D-T18） */
+  status: RecordStatus;
+  version: number;
+  /** 服务端收到时刻（DATA-09：离线场景下即同步成功时刻） */
+  submitted_at: string;
+  /** 接班人（带出或修改后；无次日排班为 null） */
+  receiver: { id: number; real_name: string } | null;
+  /** 本次提交是否修改了接班人（true 时 receiver_change_reason 已留痕，DATA-10） */
+  receiver_changed: boolean;
+}
 
 // ── 契约 §3.2 GET /records/today/prev（上一班读数带出；F1-05、F1-15、DATA-02、F3-07；TK-07）─────────
 

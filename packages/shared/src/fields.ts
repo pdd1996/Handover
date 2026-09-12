@@ -453,6 +453,40 @@ export const FIELD_PRECISION: Readonly<Partial<Record<RecordFieldName, FieldPrec
 };
 
 /**
+ * 逐字段文本长度上限（TK-12 评审修复轮 M2）：**varchar 列逐项照录**《技术方案与数据库设计
+ * v0.2》§4.2 records 建表 DDL 的长度声明，与 apps/api/src/db/schema.ts 一致。用途：
+ * 提交/卡内校验对超长文本拦为 400 点名（C-09），防「MySQL 严格模式拒绝 → 500」（实证：
+ * hp_note varchar(200) 上送 300 字曾 500）；h5 textarea 同源绑定 maxlength。
+ *
+ * 覆盖范围：kind='text' 全部字段 + `boiler_no`（kind='enum' 但列为 varchar(16)，configs
+ * 驱动的候选原文可能超长）。JSON 列（hvac_locs）无数组长度上限，元素类型由 validateFields
+ * 校验（须为 string，评审 L3）。`receiver_change_reason` 虽属 section 0（提交侧单独处理、
+ * 不进静态必填校验），长度上限仍在此登记供 submit 侧使用。
+ * 漏登记由 `TEXT_FIELDS_MISSING_LENGTH` 哨兵暴露（与 NUMERIC_FIELDS_MISSING_PRECISION 同策略）。
+ */
+export const FIELD_LENGTHS: Readonly<Partial<Record<RecordFieldName, number>>> = {
+  hp_note: 200,
+  neg_note: 200,
+  air_note: 200,
+  boiler_note: 200,
+  coolroom_note: 200,
+  hvac_note: 200,
+  handover_note: 1000,
+  energy_note: 500,
+  boiler_no: 16,
+  receiver_change_reason: 200,
+};
+
+/**
+ * 应登记而未登记长度的文本字段（**应恒为空**）：kind='text' 或 varchar 承载的 `boiler_no`
+ * 却不在 FIELD_LENGTHS 的字段清单（黄金值哨兵，同上策略）。
+ */
+export const TEXT_FIELDS_MISSING_LENGTH: readonly RecordFieldName[] = FIELD_NAMES.filter(
+  (name) =>
+    (FIELD_BY_NAME[name].kind === 'text' || name === 'boiler_no') && !(name in FIELD_LENGTHS),
+);
+
+/**
  * 应登记而未登记精度的数值字段（**应恒为空**）：kind='number' 却不在 FIELD_PRECISION
  * 的字段清单。与 cards.ts `DUPLICATE_CARD_FIELD_OWNERS` 同款策略——不在模块加载时抛错
  * （shared 被三端 import，字典笔误不能直接崩），由用例断言为空（黄金值哨兵）。
