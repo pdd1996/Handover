@@ -15,12 +15,14 @@ import { computed, nextTick, onMounted, ref } from 'vue';
 import { showToast } from 'vant';
 import {
   CARD_BY_FIELD,
+  isFilledValue,
   type FormOptionsDto,
   type MissingField,
   type PrevDto,
   type PreviewDto,
   type SubmitPayloadDto,
   type TodayDto,
+  type UsageOverridePayload,
 } from '@handover/shared';
 import { ApiRequestError, api, type AuthUser } from './api/client';
 import TodayView from './views/TodayView.vue';
@@ -240,7 +242,19 @@ function buildPayload(): SubmitPayloadDto {
       sections[field.name] = d !== null ? d : (field.value ?? null);
     }
   }
-  return { sections };
+  // 用量手工覆盖（TK-13，F3-04/F3-06）：lo_day_use 草稿有值即视为师傅改写了自动推荐值，
+  // 随附原因上送（sections 里的 *_use 键服务端不采信，覆盖必须显式走本清单）；原因空白
+  // 由服务端 400 点名拦截（F3-06-T2），SectionView 完成本卡时已先行预检同口径
+  const usage_overrides: UsageOverridePayload[] = [];
+  const loOverride = draft.getValue('lo_day_use');
+  if (isFilledValue(loOverride)) {
+    usage_overrides.push({
+      field: 'lo_day_use',
+      value: String(loOverride),
+      reason: String(draft.getValue('usage_override_reason') ?? ''),
+    });
+  }
+  return usage_overrides.length > 0 ? { sections, usage_overrides } : { sections };
 }
 
 async function onOpenPreview(): Promise<void> {

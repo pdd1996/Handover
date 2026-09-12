@@ -23,7 +23,10 @@ import { reactive, ref } from 'vue';
 import type { RecordFieldName } from '@handover/shared';
 import { draftKey, loadDraft, removeDraft, saveDraft, type DraftValues } from './draft-db';
 
-const values = reactive<Partial<Record<RecordFieldName, unknown>>>({});
+/** 草稿键：字段字典内列名 + 覆盖原因这一非字典键（TK-13，见 draft-db.ts DraftValues 注） */
+type DraftKey = RecordFieldName | 'usage_override_reason';
+
+const values = reactive<DraftValues>({});
 
 /** 当前草稿归属键；null = 本页会话尚未建立归属（未登录/未恢复过） */
 let currentKey: string | null = null;
@@ -84,14 +87,14 @@ function deleteAllKeys(): void {
 
 export function useDraft() {
   /** 读值：草稿优先，未填返回 null（调用方自行与服务端值合并） */
-  function getValue(name: RecordFieldName): unknown {
+  function getValue(name: DraftKey): unknown {
     return values[name] ?? null;
   }
 
   /** 写值：v 为 null/undefined/空串/空数组时清除键，避免字典累积脏键
    * （空数组=全部取消勾选，isFilledValue 口径下亦算未填，存脏键只会误导角标合并口径）。
    * 同时熄灭「已自动保存」指示——新改动未落盘前不得显示已保存（TK-08 评审 m1） */
-  function setValue(name: RecordFieldName, v: unknown): void {
+  function setValue(name: DraftKey, v: unknown): void {
     const isEmptyArray = Array.isArray(v) && v.length === 0;
     if (
       v === null ||
@@ -101,7 +104,8 @@ export function useDraft() {
     ) {
       delete values[name];
     } else {
-      values[name] = v;
+      // 字典键值型宽松（unknown），覆盖原因键为 string——统一经索引签名写入（TS 收窄别拗）
+      (values as Record<string, unknown>)[name] = v;
     }
     if (!restoring) {
       lastSavedAt.value = 0;

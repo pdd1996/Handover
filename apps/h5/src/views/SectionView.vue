@@ -44,6 +44,11 @@ import {
   measuredAtTarget,
   localMeasuredAt,
   tankRoleOf,
+  toMissingField,
+  waterDayUseOf,
+  eDayUseOf,
+  gasDayUseOf,
+  loDayUseOf,
   type CardDto,
   type FieldValueGetter,
   type FormOptionsDto,
@@ -207,6 +212,53 @@ function prevOf(name: RecordFieldName): string | null {
   return String(v);
 }
 
+// ── 用量实时预览（TK-13，技术方案 §5.2「前端实时预览」）──────────────────────────
+// 预览非权威：提交时由服务端以同一批 shared calc.ts 纯函数计算固化（契约 §4 第 3 步），
+// 上一班取数与服务端 adjacentPrevRow 同口径（相邻班次已提交记录，D-T17）
+
+/** 服务端计算固化的用量字段（shared USAGE_FIELDS 客户端半边；键集变动由 shared 哨兵暴露） */
+const SERVER_CALCULATED: ReadonlySet<RecordFieldName> = new Set<RecordFieldName>([
+  'water_use',
+  'e_use',
+  'gas_use',
+  'lo_day_use',
+]);
+
+/** 上一班读数 getter（用量计算直接取上一班同名字段；液氧日间用量不依赖上一班） */
+const prevGet: FieldValueGetter = (name) =>
+  (prevReadings.value?.[name] as string | number | null) ?? null;
+
+/** 差值的带符号展示（PRD §6.3 示例口径「如意线 +400」；负差如充气原样显负数） */
+function signed(n: number): string {
+  return n >= 0 ? `+${n}` : String(n);
+}
+
+/** 用量预览文本；null = 无法计算（上一班缺失/读数未齐），显“—”口径交由只读分支处理 */
+function usagePreviewOf(name: RecordFieldName): string | null {
+  if (name === 'water_use') {
+    const v = waterDayUseOf(get, prevGet);
+    return v === null ? null : `${v} 吨`;
+  }
+  if (name === 'e_use') {
+    // F3-02 分线同屏展示（D-P09）：分线差值与合计同显
+    const r = eDayUseOf(get, prevGet);
+    return r === null
+      ? null
+      : `如意线 ${signed(r.line1)} · 工贸线 ${signed(r.line2)}，合计 ${r.total} 度`;
+  }
+  if (name === 'gas_use') {
+    const r = gasDayUseOf(get, prevGet);
+    return r === null
+      ? null
+      : `主卡 ${signed(r.line1)} · 副卡 ${signed(r.line2)}，合计 ${r.total} 立方米`;
+  }
+  if (name === 'lo_day_use') {
+    const v = loDayUseOf(get);
+    return v === null ? null : `${v} L`;
+  }
+  return null;
+}
+
 /** 派生列的只读说明（为何不可编辑：服务端提交时计算固化，契约 §4 第 3 步） */
 const READONLY_HINT: Partial<Record<RecordFieldName, string>> = {
   water_use: '提交时由服务端自动计算并固化（F3）',
@@ -231,6 +283,11 @@ interface FieldRow {
   abnormal: boolean;
   anchor: string;
   hint?: string;
+  /** 用量实时预览（仅 SERVER_CALCULATED 字段；null/undefined = 暂无法计算不展示） */
+  usagePreview?: string;
+  /** 师傅是否在本机草稿填了覆盖值（**draft-only**，评审修复轮 M2：不得用合并视图
+   * 误判——服务端已有值（提交后重开卡/撤回重提）不等于本次手工覆盖） */
+  overridden?: boolean;
 }
 
 /** 本卡字段行 = shared 字典静态元数据 + 动态必填/已填/异常判定（与接口同一口径） */
@@ -261,6 +318,10 @@ const rows = computed<FieldRow[]>(() =>
       // 锚点与 C-09 点名结构同一函数生成（errors.ts fieldAnchor），跳转才能两端对上
       anchor: def ? fieldAnchor(def.section, name).slice(1) : `field-${f.name}`,
       hint: READONLY_HINT[name],
+      usagePreview: SERVER_CALCULATED.has(name) ? (usagePreviewOf(name) ?? undefined) : undefined,
+      // 覆盖判定只用本机草稿（评审修复轮 M2）：与 App.vue buildPayload 的 usage_overrides
+      // 组装同一数据源，服务端已有值不构成「本次覆盖」
+      overridden: SERVER_CALCULATED.has(name) ? isFilledValue(draft.getValue(name)) : undefined,
     };
   }),
 );
@@ -271,6 +332,26 @@ function displayValue(row: FieldRow): string {
   if (v === null || v === undefined || v === '') return '—';
   if (Array.isArray(v)) return v.length === 0 ? '—' : v.join('、');
   return String(v);
+}
+
+/** 覆盖原因（非字典键，存草稿随持久化；离线可用，D-T18） */
+const overrideReasonModel = computed(() => {
+  const v = draft.getValue('usage_override_reason');
+  return v === null ? '' : String(v);
+});
+
+/** 写覆盖原因并顺手熄灭报错高亮（与 writeValue 同口径） */
+function writeOverrideReason(v: string): void {
+  draft.setValue('usage_override_reason', v);
+  errorFields.value.delete('lo_day_use');
+}
+
+/** 清覆盖值时连带清原因（评审修复轮 L6：覆盖值与覆盖原因同生同灭，
+ *  避免旧原因残留草稿被下次覆盖悄悄复用） */
+function clearOrphanOverrideReason(name: RecordFieldName, v: unknown): void {
+  if (name === 'lo_day_use' && !isFilledValue(v)) {
+    draft.setValue('usage_override_reason', null);
+  }
 }
 
 /** 写值并顺手清除该字段的报错高亮（C-09：改了就不该继续红着） */
@@ -321,6 +402,22 @@ const focusedField = ref<string | null>(null);
 function onComplete(): void {
   const names = props.card.fields.map((f) => f.name as RecordFieldName);
   const body = validateForError(names, get);
+  // 用量覆盖原因预检（TK-13，F3-06）：本卡含 lo_day_use 且**本机草稿填了覆盖值**时原因必填——
+  // 与服务端 F3-06-T2 同口径的本地拦截，数据源与 buildPayload 的 usage_overrides 组装一致
+  // （评审修复轮 M2：draft-only，不得用合并视图——服务端已有值不是本次覆盖，否则撤回重提
+  // 与提交后重开卡会被凭空要求填原因）
+  if (
+    names.includes('lo_day_use') &&
+    isFilledValue(draft.getValue('lo_day_use')) &&
+    !isFilledValue(draft.getValue('usage_override_reason'))
+  ) {
+    const item = toMissingField('lo_day_use');
+    missingFields.value = [item];
+    errorMessage.value = '覆盖自动计算值须填写原因（留痕，F3-06）';
+    errorFields.value = new Set([item.field]);
+    showToast(errorMessage.value);
+    return;
+  }
   if (body) {
     missingFields.value = body.missing_fields;
     errorMessage.value = body.message;
@@ -541,6 +638,45 @@ const headerTitle = computed(() =>
               @update:model-value="(v: string) => writeValue(row.name, v)"
             />
 
+            <!-- 用量覆盖入口（TK-13，F3-04/F3-06）：auto_editable 的 lo_day_use 可改自动
+                 推荐值，改值必填原因（本地预检 + 服务端 F3-06-T2 双道；原因随草稿持久化） -->
+            <template v-else-if="row.kind === 'number' && row.fill === 'auto_editable'">
+              <van-field
+                :model-value="String(modelOf(row.name))"
+                type="number"
+                inputmode="decimal"
+                :name="row.name"
+                :placeholder="`留空则按自动计算值固化（${row.unit ?? ''}）`"
+                class="rounded-lg bg-slate-50 px-3"
+                :data-testid="`input-${row.name}`"
+                @update:model-value="
+                  (v: string) => {
+                    writeValue(row.name, v);
+                    clearOrphanOverrideReason(row.name, v);
+                  }
+                "
+              />
+              <div
+                v-if="!row.overridden && row.usagePreview"
+                class="mt-0.5 text-xs text-emerald-700"
+                :data-testid="`usage-preview-${row.name}`"
+              >
+                自动计算（推荐值）：{{ row.usagePreview }}
+              </div>
+              <van-field
+                v-if="row.overridden"
+                :model-value="overrideReasonModel"
+                type="textarea"
+                autosize
+                rows="1"
+                :maxlength="200"
+                placeholder="覆盖原因必填（留痕 audit_logs，F3-06）"
+                class="mt-1 rounded-lg bg-amber-50 px-3"
+                data-testid="input-usage_override_reason"
+                @update:model-value="writeOverrideReason"
+              />
+            </template>
+
             <!-- 派生列只读展示：提交时服务端计算固化，客户端传值不被信任 -->
             <div v-else class="py-1 text-sm" :data-testid="`value-${row.name}`">
               <template v-if="row.hint">
@@ -550,6 +686,15 @@ const headerTitle = computed(() =>
               <span v-else :class="row.filled ? 'text-slate-800' : 'text-slate-300'">
                 {{ displayValue(row) }}
               </span>
+              <!-- 用量实时预览（TK-13）：非权威，提交时以服务端计算固化为准；
+                   水显差值、电/气分线（卡）同屏（F3-02/F3-03），上一班缺失时不展示 -->
+              <div
+                v-if="row.usagePreview"
+                class="mt-0.5 text-xs text-emerald-700"
+                :data-testid="`usage-preview-${row.name}`"
+              >
+                自动计算（预览）：{{ row.usagePreview }}
+              </div>
             </div>
           </div>
 
