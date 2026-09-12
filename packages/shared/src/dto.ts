@@ -12,6 +12,7 @@
  */
 
 import type { RecordStatus } from './enums';
+import type { UsageFieldName } from './calc';
 import type { RecordFieldName } from './fields';
 import type { SectionNo } from './sections';
 import type { ConfirmationPayload, DutyGuardConfirm, MissingField } from './errors';
@@ -51,6 +52,12 @@ export interface CardFieldStateDto {
   abnormal: boolean;
   /** 原值（decimal 列为字符串，与 Drizzle 一致）；无记录或未填为 null */
   value: unknown;
+  /**
+   * 该值是否为师傅手工覆盖（TK-13，F3-06-T1「标识与人工值可区分」）：true = 人工覆盖
+   * （audit_logs 有 `record.usage_override` 留痕可追溯）；缺省/undefined = 服务端自动计算。
+   * 仅服务端计算固化的用量字段（shared `USAGE_FIELDS`）可能出现 true。
+   */
+  manual?: boolean;
 }
 
 /** 一张任务卡（F1-02） */
@@ -183,10 +190,31 @@ export interface SubmitPayloadDto {
   receiver_id?: number | null;
   /** 接班人修改原因（DATA-10：修改必填原因并留痕） */
   receiver_change_reason?: string | null;
+  /**
+   * 用量手工覆盖（TK-13，F3-04/F3-06）：`*_use` 由服务端计算固化、sections 里的同名键
+   * 恒不被信任（契约 §4 第 3 步），师傅改值必须显式走本清单——`reason` 缺失/空白由服务端
+   * 400 点名（F3-06-T2，非仅前端），合法覆盖以覆盖值固化并写 `record.usage_override`
+   * 审计留痕（F3-04-T2）。合法键集 shared `USAGE_FIELDS`。
+   */
+  usage_overrides?: readonly UsageOverridePayload[];
   /** 防呆确认（TK-14 消费）；本阶段仅接收 */
   confirmations?: readonly ConfirmationPayload[];
   /** 排班安全阀确认（TK-26 消费，F6-05）；本阶段仅接收 */
   duty_guard_confirm?: DutyGuardConfirm;
+}
+
+/**
+ * 用量手工覆盖项（TK-13，F3-04/F3-06）：对服务端自动计算值的人工改写载体。
+ * `reason` 必填——F3-06-T2 判据「覆盖自动值但不填原因 → 提交 → 阻止」由服务端校验，
+ * 原因随 `audit_logs.reason` 留痕（技术方案 §5.5，台账 F3-06「技术方案」列）。
+ */
+export interface UsageOverridePayload {
+  /** 覆盖的用量字段（shared `USAGE_FIELDS` 键集，拼错编译期即报） */
+  field: UsageFieldName;
+  /** 覆盖值（十进制字面量，与表单数值同形态；服务端按列精度取整后固化） */
+  value: string | number;
+  /** 覆盖原因（必填，空白即 400 点名该用量字段） */
+  reason: string;
 }
 
 /**
