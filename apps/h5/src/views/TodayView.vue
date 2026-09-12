@@ -25,8 +25,13 @@ import {
 import TaskCard from '../components/TaskCard.vue';
 import { useDraft } from '../store/draft';
 
-const props = defineProps<{ today: TodayDto }>();
-defineEmits<{ (e: 'open', key: string): void }>();
+const props = defineProps<{
+  today: TodayDto;
+  /** 是否可提交（TK-12 评审修复轮 L1/M6）：提交是师傅端写操作（契约 §3.2 master），
+   * 科长巡查不显入口；且撤回重提（draft 态）需重现入口 */
+  canSubmit?: boolean;
+}>();
+defineEmits<{ (e: 'open', key: string): void; (e: 'submit'): void }>();
 
 const { getValue: getDraft } = useDraft();
 
@@ -197,6 +202,18 @@ const syncText = computed(() => (props.today.pending_sync ? '待同步' : '已�
 
       <div class="mt-4 text-center text-xs text-slate-400">
         共 {{ today.cards.length }} 张任务卡 · 覆盖十个板块
+      </div>
+
+      <!-- 提交入口（TK-12，F1-10/F2-01）：当日无记录或有 draft 记录（撤回重提，评审 M6）时可见；
+           已提交/异议/完成时隐藏——一天一条（F1-01），重提仅随撤回（TK-21）路径出现；
+           仅 master 可见（评审 L1：科长巡查不再看到点了就 403 的死按钮） -->
+      <div v-if="canSubmit && (!today.record || today.record.status === 'draft')" class="mt-5">
+        <van-button block type="danger" data-testid="submit-open" @click="$emit('submit')">
+          提交交接单
+        </van-button>
+        <div class="mt-1.5 text-center text-xs text-slate-400">
+          提交前先预览未填项与异常项，提交后生成本班次正式交接单
+        </div>
       </div>
     </div>
   </div>

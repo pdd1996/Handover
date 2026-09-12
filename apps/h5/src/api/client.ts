@@ -9,7 +9,16 @@
  * 响应类型全部取自 `@handover/shared` 的 dto 模块：与 api 端产出的是同一份契约类型，
  * 前端不另写 interface（否则两处随迭代漂移）。
  */
-import type { ApiError, FormOptionsDto, PrevDto, TodayDto, UserRole } from '@handover/shared';
+import type {
+  ApiError,
+  FormOptionsDto,
+  PrevDto,
+  PreviewDto,
+  SubmitPayloadDto,
+  SubmitResultDto,
+  TodayDto,
+  UserRole,
+} from '@handover/shared';
 
 const BASE = '/api/v1';
 
@@ -85,5 +94,15 @@ export const api = {
   /** GET /configs —— 表单选项类配置白名单（DATA-07：hvac_locs 多选 / boiler_list 枚举候选，TK-11） */
   configs(): Promise<FormOptionsDto> {
     return http('/configs');
+  },
+
+  /** POST /records/today/preview —— 提交前汇总预览（F1-10：未填项/异常项点名清单，TK-12） */
+  preview(payload: SubmitPayloadDto): Promise<PreviewDto> {
+    return http('/records/today/preview', { method: 'POST', body: JSON.stringify(payload) });
+  },
+
+  /** POST /records/today/submit —— 正式提交（F2-01：生成正式交接单，TK-12） */
+  submit(payload: SubmitPayloadDto): Promise<SubmitResultDto> {
+    return http('/records/today/submit', { method: 'POST', body: JSON.stringify(payload) });
   },
 };

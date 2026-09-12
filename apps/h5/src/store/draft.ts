@@ -151,11 +151,14 @@ export function useDraft() {
    * 该班次提交成功后清除持久草稿（**TK-12 提交成功后必须调用**，D-T18 修订 #9）——
    * 否则重开页面旧草稿复活并以「草稿 ?? 服务端值」优先于服务端真值（撤回后同）。
    * 若清除的正是当前归属键，内存一并清。
+   * 返回是否真正提交（评审修复轮 L2：调用方须据实处理清除失败——它正是本钩子要防的
+   * 「旧草稿复活压过服务端真值」，静默吞掉失败会让防线失效）。
    */
-  async function markSubmitted(userId: number, dutyDate: string): Promise<void> {
+  async function markSubmitted(userId: number, dutyDate: string): Promise<boolean> {
     const key = draftKey(userId, dutyDate);
-    await removeDraft(key);
+    const ok = await removeDraft(key);
     if (currentKey === key) clearMemory();
+    return ok;
   }
 
   return { values, getValue, setValue, restore, clearMemory, markSubmitted, lastSavedAt };

@@ -33,6 +33,7 @@ import { computed, ref } from 'vue';
 import { showToast } from 'vant';
 import {
   FIELD_BY_NAME,
+  FIELD_LENGTHS,
   fieldAnchor,
   validateForError,
   isRequiredField,
@@ -525,13 +526,15 @@ const headerTitle = computed(() =>
               候选清单为空，请联系科长在后台配置
             </div>
 
-            <!-- 文本备注：异常说明 / 交接事项 / 节能减排 -->
+            <!-- 文本备注：异常说明 / 交接事项 / 节能减排；maxlength 同源绑定 shared
+                 FIELD_LENGTHS（评审修复轮 M2：varchar 列超限会被 MySQL 拒绝 → 500） -->
             <van-field
               v-else-if="row.kind === 'text'"
               :model-value="String(modelOf(row.name))"
               type="textarea"
               autosize
               rows="1"
+              :maxlength="FIELD_LENGTHS[row.name]"
               :placeholder="row.required ? '异常时必填原因' : '可留空'"
               class="rounded-lg bg-slate-50 px-3"
               :data-testid="`input-${row.name}`"
