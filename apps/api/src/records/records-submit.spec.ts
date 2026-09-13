@@ -56,12 +56,14 @@ const LO_EIGHT: readonly string[] = [
  */
 function fullSections(): Record<string, unknown> {
   return {
-    water_reading: '100.0',
-    e1_reading: '200.0',
-    e2_reading: '150.0',
+    // 基准读数全部高于种子 D-1（水 12250 / 电 53420+43150 / 气 310+210）：不命中防呆
+    // （TK-14 落地后，回退/充气命中须确认重提，其协议与负差固化由 records-fangdai.spec 专章覆盖）
+    water_reading: '12300.0',
+    e1_reading: '53500.0',
+    e2_reading: '43200.0',
     hp_status: 'ok',
     g1_remaining: '300.0',
-    g2_remaining: '250.0',
+    g2_remaining: '200.0',
     tank_in_use: 1,
     ...Object.fromEntries(
       LO_EIGHT.map((n) => [n, n.endsWith('_p') || n.includes('_p') ? '0.80' : '5000.00']),
@@ -309,7 +311,7 @@ describe('TK-12 在线提交与预览（F1-10/F2-01/F1-08/DATA-01/05/07/09/10/13
       const row = await recordRow();
       expect(row?.status).toBe('submitted');
       expect(row?.energyNote).toBeNull(); // 未上送 → 快照清列（不再残留）
-      expect(row?.waterReading).toBe('100.0'); // 上送覆盖
+      expect(row?.waterReading).toBe('12300.0'); // 上送覆盖
       await cleanRecord();
     });
   });
@@ -532,13 +534,12 @@ describe('TK-12 在线提交与预览（F1-10/F2-01/F1-08/DATA-01/05/07/09/10/13
         .expect(201);
       const row = await recordRow();
       // 诱饵传值 999 全部不采信；服务端按种子 D-1（水 12250 / 电 53420+43150 / 气 310+210）
-      // 与本班 fullSections 基准值计算（黄金期望口径同 records-usage.spec.ts）：
-      // 水子 100−12250=−12150；电 (200−53420)+(150−43150)=−96220；气 (310−300)+(210−250)=−30；
-      // 液氧 tank 1 在用罐 5000.00−5000.00=0。负差不夹逼（换表/充气真实场景原样固化，
-      // 防呆确认与覆盖留痕分属 TK-14/F3-06）
-      expect(Number(row?.waterUse)).toBe(-12150);
-      expect(Number(row?.eUse)).toBe(-96220);
-      expect(Number(row?.gasUse)).toBe(-30);
+      // 与本班 fullSections 基准值计算：水 12300−12250=50；
+      // 电 (53500−53420)+(43200−43150)=80+50=130；气 (310−300)+(210−200)=10+10=20；
+      // 液氧 tank 1 在用罐 5000.00−5000.00=0（负差不夹逼与防呆确认协议见 records-fangdai.spec）
+      expect(Number(row?.waterUse)).toBe(50);
+      expect(Number(row?.eUse)).toBe(130);
+      expect(Number(row?.gasUse)).toBe(20);
       expect(Number(row?.loDayUse)).toBe(0);
       await cleanRecord();
     });
