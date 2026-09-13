@@ -10,7 +10,10 @@ import {
   TASK_CARDS,
   USAGE_FIELDS,
   buildValidationError,
+  DECREASED_GUARD_FIELDS,
+  decreasedReadingsOf,
   eDayUseOf,
+  GAS_CARD_FIELDS,
   gasDayUseOf,
   isFilledValue,
   isRequiredField,
@@ -18,6 +21,8 @@ import {
   localMeasuredAt,
   numericMaxOf,
   parseNumeric,
+  PREV_BACKFILL_FIELDS,
+  refillCardsOf,
   roundToScaleOf,
   toMissingField,
   validateFields,
@@ -26,8 +31,12 @@ import {
   type CardDef,
   type CardDto,
   type CardFieldStateDto,
+  type ConfirmItem,
+  type ConfirmationPayload,
   type FieldValueGetter,
   type MissingField,
+  type PrevBackfillField,
+  type DecreasedGuardField,
   type PrevDto,
   type PrevRecordDto,
   type PreviewDto,
@@ -133,6 +142,25 @@ const USAGE_OVERRIDE_BAD_FIELD = (raw: string): MissingField => ({
   label: '不支持的用量覆盖字段',
   anchor: '#sec-4-usage-override',
 });
+
+/** 非数组清单的合成定位项（评审修复轮 M2）：field 不在 §2 取值域内，域外回显同上先例 */
+const CONFIRMATION_BAD_PAYLOAD = (): MissingField => ({
+  field: 'confirmations' as MissingTarget,
+  section: 0,
+  label: '防呆确认项格式非法（须为数组）',
+  anchor: '#sec-0-confirmations',
+});
+
+const USAGE_OVERRIDE_BAD_PAYLOAD = (): MissingField => ({
+  field: 'usage_overrides' as MissingTarget,
+  section: 4,
+  label: '用量覆盖项格式非法（须为数组）',
+  anchor: '#sec-4-usage-overrides',
+});
+
+/** 类型守卫：payload 的 field 是宽字典类型，命中判定必须收窄到回退三字段 */
+const isDecreasedField = (v: unknown): v is DecreasedGuardField =>
+  DECREASED_GUARD_FIELDS.includes(v as DecreasedGuardField);
 
 /** records 表的 DB 列名集合（用于识别字典里的派生字段，如 lo_night_use 非存储列） */
 const RECORD_DB_COLUMNS: ReadonlySet<string> = new Set(
@@ -431,11 +459,15 @@ export class RecordsService {
   }
 
   /**
-   * 用量列计算（TK-13，契约 §4 第 3 步的单一落点）：四类口径全部消费 shared calc.ts 同一
-   * 纯函数（与 h5 实时预览同源，杜绝两端各算一套）。当前值 getter 读提交 payload 原始值
-   * （第 1 步校验已保证可解析），上一班 getter 读相邻班次记录行（adjacentPrevRow，D-T17）。
-   * 无法计算（上一班缺失/读数缺）→ 列置 null 固化，不拦提交（用量列非必填；补录随 TK-14）。
+   * 用量列计算（TK-13，契约 §4 第 3 步的单一落点；TK-14 接入防呆取数）：四类口径全部
+   * 消费 shared calc.ts 同一纯函数（与 h5 实时预览同源，杜绝两端各算一套）。当前值 getter
+   * 读提交 payload 原始值（第 1 步校验已保证可解析），上一班 getter 由调用方构造——
+   * 相邻班次记录行（adjacentPrevRow，D-T17）或缺失态下的补录值（F3-07，D-T19）。
+   * 无法计算（上一班缺失/读数缺）→ 列置 null 固化，不拦提交（用量列非必填）。
    * 返回 `auto` 供覆盖协议回填审计 oldValue（覆盖前服务端算出的自动值）。
+   *
+   * **充气确认取数层（TK-14，D-P14）**：`refilled` 为确认充气的卡号集合——gasDayUseOf
+   * 据此把该卡差值按 0 计、另一卡正常计算；未确认时负差原样固化（契约订正 13 口径）。
    *
    * **列容量护栏（评审修复轮 L3）**：两线读数各自合法但差值**之和**可超 DECIMAL(12,1) 上限
    * （与「服务端未校验直接入库 → 500」同族）——超容量的用量列置 null 并记 error 日志，
@@ -443,21 +475,16 @@ export class RecordsService {
    */
   private computeUsageValues(
     sections: Readonly<Partial<Record<RecordFieldName, unknown>>>,
-    prevRow: typeof records.$inferSelect | null,
+    prev: FieldValueGetter,
+    refilled: ReadonlySet<1 | 2>,
   ): {
     values: Record<string, string | null>;
     auto: Partial<Record<UsageFieldName, number>>;
   } {
     const cur: FieldValueGetter = (name) => sections[name] ?? null;
-    const prev: FieldValueGetter = prevRow
-      ? (name) => {
-          const key = recordKeyOf(name, this.logger);
-          return key ? ((prevRow[key as keyof typeof prevRow] as unknown) ?? null) : null;
-        }
-      : () => null;
     const water = waterDayUseOf(cur, prev);
     const e = eDayUseOf(cur, prev);
-    const gas = gasDayUseOf(cur, prev);
+    const gas = gasDayUseOf(cur, prev, refilled);
     const lo = loDayUseOf(cur);
     // 列容量护栏：|计算值| 超列上限 → null（不入库），而非让 MySQL 严格模式报 500
     const capped = (field: UsageFieldName, n: number): string | null => {
@@ -498,9 +525,10 @@ export class RecordsService {
    * L4）；`reason` 空白 → missing 点名该用量字段（F3-06-T2 服务端强制，非仅前端）；
    * `reason` 超长（audit_logs.reason varchar(200)）与 `receiver_change_reason` 超长同口径
    * 以字段字典名义点名（评审修复轮 M4：不再误用「不支持的用量覆盖字段」）；值须为十进制
-   * 字面量且不超列精度上限（numericMaxOf），否则越界点名。
+   * 字面量且不超列精度上限（numericMaxOf），否则越界点名；非数组上送 → 合成定位项点名
+   * （评审修复轮 M2：原 for..of 迭代器异常会 500，收敛为一律 400）。
    */
-  private validateUsageOverrides(input: readonly UsageOverridePayload[]): {
+  private validateUsageOverrides(input: unknown): {
     missing: MissingField[];
     outOfRange: MissingField[];
     valid: Array<{ field: UsageFieldName; value: number; reason: string }>;
@@ -508,8 +536,13 @@ export class RecordsService {
     const missing: MissingField[] = [];
     const outOfRange: MissingField[] = [];
     const valid: Array<{ field: UsageFieldName; value: number; reason: string }> = [];
+    // 未上送（undefined/null）= 无覆盖，合法；上送了但非数组才 400（评审修复轮 M2）
+    if (input != null && !Array.isArray(input)) {
+      outOfRange.push(USAGE_OVERRIDE_BAD_PAYLOAD());
+      return { missing, outOfRange, valid };
+    }
     const seen = new Set<UsageFieldName>();
-    for (const o of input) {
+    for (const o of (input ?? []) as readonly UsageOverridePayload[]) {
       if (!USAGE_FIELDS.includes(o.field)) {
         outOfRange.push(USAGE_OVERRIDE_BAD_FIELD(String(o.field)));
         continue;
@@ -538,6 +571,79 @@ export class RecordsService {
       valid.push({ field, value: n, reason });
     }
     return { missing, outOfRange, valid };
+  }
+
+  /**
+   * 补录上一班读数校验（TK-14，F3-07；D-T19）：合法键集 shared `PREV_BACKFILL_FIELDS`，
+   * 白名单外键忽略（与 sections 同一口径）；值须为十进制字面量且**非负、不超列容量上限**
+   * （评审修复轮 L1：与 validateUsageOverrides 同口径——脏基线不再进入 need_confirm 可解释
+   * 文案与 record.prev_backfill 审计；读数无负值语义，下限 0 与 validation.ts 同门）。
+   * 校验与消费解耦：垃圾值无论上一班是否缺失都不放行（消费仅限缺失态，见 submit）。
+   */
+  private validatePrevBackfill(
+    input: Readonly<Partial<Record<PrevBackfillField, unknown>>> | undefined,
+  ): { outOfRange: MissingField[]; readings: Partial<Record<PrevBackfillField, number>> } {
+    const outOfRange: MissingField[] = [];
+    const readings: Partial<Record<PrevBackfillField, number>> = {};
+    for (const [name, raw] of Object.entries(input ?? {})) {
+      if (!PREV_BACKFILL_FIELDS.includes(name as PrevBackfillField)) continue;
+      const n = parseNumeric(raw);
+      const max = numericMaxOf(name as PrevBackfillField);
+      if (n === null || n < 0 || n > (max ?? Infinity)) {
+        outOfRange.push(toMissingField(name as PrevBackfillField));
+        continue;
+      }
+      readings[name as PrevBackfillField] = n;
+    }
+    return { outOfRange, readings };
+  }
+
+  /**
+   * 防呆确认项校验与归一（评审修复轮 M1/M2）：preview 与 submit 消费同一函数（M3/L4
+   * 「预检即点名」同纪律）。规则：
+   * - 非数组 → 400 合成定位项点名（M2：原 for..of 迭代器异常会 500）；
+   * - `reason` 空白 → 视为未确认，从归一清单剔除（与未上送同待，F1-12-T2 不另 400）；
+   * - `reason` 超长（audit_logs.reason varchar(200)）→ 400 越界点名，以字段字典名义
+   *   （reading_decreased 点该 field、gas_refill 点对应气卡字段，与覆盖原因超长 M4 同口径；
+   *   原直写审计列会撞 MySQL 1406 → 事务回滚 500，评审探针实证）；
+   * - type 越值 / field 与类型不符的项保持容错忽略（消费侧不命中即不消费，不另 400）。
+   */
+  private validateConfirmations(input: unknown): {
+    outOfRange: MissingField[];
+    normalized: Array<
+      | { type: 'reading_decreased'; field: DecreasedGuardField; reason: string }
+      | { type: 'gas_refill'; card: 1 | 2; reason: string }
+    >;
+  } {
+    const outOfRange: MissingField[] = [];
+    const normalized: Array<
+      | { type: 'reading_decreased'; field: DecreasedGuardField; reason: string }
+      | { type: 'gas_refill'; card: 1 | 2; reason: string }
+    > = [];
+    // 未上送（undefined/null）= 无确认项，合法（F1-12-T2 语义）；上送了但非数组才 400（M2）
+    if (input != null && !Array.isArray(input)) {
+      outOfRange.push(CONFIRMATION_BAD_PAYLOAD());
+      return { outOfRange, normalized };
+    }
+    for (const raw of (input ?? []) as readonly ConfirmationPayload[]) {
+      const reason = typeof raw?.reason === 'string' ? raw.reason.trim() : '';
+      if (reason === '') continue;
+      if (raw.type === 'reading_decreased' && isDecreasedField(raw.field)) {
+        if (reason.length > 200) {
+          outOfRange.push(toMissingField(raw.field));
+          continue;
+        }
+        normalized.push({ type: 'reading_decreased', field: raw.field, reason });
+      } else if (raw.type === 'gas_refill' && (raw.card === 1 || raw.card === 2)) {
+        const card = raw.card as 1 | 2;
+        if (reason.length > 200) {
+          outOfRange.push(toMissingField(GAS_CARD_FIELDS[card]));
+          continue;
+        }
+        normalized.push({ type: 'gas_refill', card, reason });
+      }
+    }
+    return { outOfRange, normalized };
   }
 
   /**
@@ -650,9 +756,12 @@ export class RecordsService {
     // 用量覆盖同口径预检（评审修复轮 M3）：与 submit 消费同一 validateUsageOverrides，
     // 消除「预览全就绪、提交却 400」的不对称（TK-12 评审 L4 同纪律）；不在此做上一班取数
     // 与计算（预览只读不落库，计算结果也不属未填/异常两张清单的范畴）
-    const overrideCheck = this.validateUsageOverrides(payload?.usage_overrides ?? []);
+    const overrideCheck = this.validateUsageOverrides(payload?.usage_overrides);
     result.missing.push(...overrideCheck.missing);
     result.outOfRange.push(...overrideCheck.outOfRange);
+    // 防呆确认项同口径预检（评审修复轮 M1）：超长原因/非数组在预览即点名
+    const confirmCheck = this.validateConfirmations(payload?.confirmations);
+    result.outOfRange.push(...confirmCheck.outOfRange);
 
     const body = buildValidationError(result);
     return {
@@ -665,9 +774,11 @@ export class RecordsService {
   /**
    * POST /records/today/submit（契约 §4 提交协议；F2-01/DATA-09/10/13，含 TK-09/10/11 挂账复验）。
    *
-   * 步骤对照契约 §4：① 必填/范围校验 → 400（C-09 结构，含用量覆盖同口径预检，评审修复轮 M3）；
-   * ② 防呆判定随 TK-14 接入（confirmations/duty_guard_confirm 本阶段仅接收不判定）；
-   * ③ 用量固化已随 TK-13 落地（服务端计算 + 覆盖协议，评审修复轮 L1 起在校验与 409 判定之后执行）；
+   * 步骤对照契约 §4：① 必填/范围校验 → 400（C-09 结构，含用量覆盖/补录读数同口径预检，
+   * 评审修复轮 M3 + TK-14）；② 防呆判定已随 TK-14 落地（F1-12 读数回退 / F1-13 充气，
+   * 409 need_confirm 清单；confirmations 消费口径见下；duty_guard_confirm 仍仅接收，随 TK-26）；
+   * ③ 用量固化已随 TK-13 落地（服务端计算 + 覆盖协议，评审修复轮 L1 起在校验与 409 判定之后执行；
+   * 上一班取数 = 相邻班次记录行或缺失态补录值，充气确认后的卡按 0 计 D-P14）；
    * ④ 标红确认行（alerts）随 TK-17/TK-22 落地；⑤ 转 submitted、submitted_at=服务端收到时刻、
    * 生成 record_no；⑥ 写审计（record.submit + record.usage_override + 接班人修改原因留痕）。
    */
@@ -722,9 +833,16 @@ export class RecordsService {
 
     // 覆盖项纯校验先行（评审修复轮 M3/L1 拆分）：与 preview 同一函数、并入同一张 400 清单，
     // 且不依赖上一班取数——校验不通过就不白跑相邻班次查询与四类计算
-    const overrideCheck = this.validateUsageOverrides(payload?.usage_overrides ?? []);
+    const overrideCheck = this.validateUsageOverrides(payload?.usage_overrides);
     result.missing.push(...overrideCheck.missing);
     result.outOfRange.push(...overrideCheck.outOfRange);
+    // 补录上一班读数校验（TK-14，F3-07）：与用量覆盖同口径并入第 1 步 400 清单
+    const backfillCheck = this.validatePrevBackfill(payload?.prev_readings);
+    result.outOfRange.push(...backfillCheck.outOfRange);
+    // 防呆确认项校验（评审修复轮 M1/M2）：与用量覆盖同口径预检（M3/L4 纪律），
+    // 超长原因/非数组在第 1 步即 400 点名，不再带病走到第 2 步撞审计列容量
+    const confirmCheck = this.validateConfirmations(payload?.confirmations);
+    result.outOfRange.push(...confirmCheck.outOfRange);
 
     const body = buildValidationError(result);
     if (body) {
@@ -744,12 +862,99 @@ export class RecordsService {
       throw new ApiException('RECORD_EXISTS', '当日记录已提交，不可重复提交');
     }
 
-    // 第 ③ 步（TK-13，契约 §4；评审修复轮 L1：移到校验/409 判定之后，无效与重复提交不白跑）：
-    // 用量由服务端计算固化——上一班取数与 GET /prev 同源（adjacentPrevRow，D-T17）；
-    // 上一班缺失 → 用量列留 null（F3-07 补录随 TK-14）；手工覆盖（F3-04/F3-06，已过
-    // validateUsageOverrides）在计算值之上改写。
+    // 第 ② 步（TK-14，契约 §4 防呆判定）：上一班取数与 GET /prev 同源（adjacentPrevRow，D-T17）；
+    // 相邻班次缺失时补录值（F3-07，已过 validatePrevBackfill）成为比对与计算基线——仅**非首班的
+    // 缺失态**消费（D-T19）：首班（first_day）无缺失语境，补录值忽略
     const prevRow = await this.adjacentPrevRow(dutyDate);
-    const usage = this.computeUsageValues(sections, prevRow);
+    let backfill: Partial<Record<PrevBackfillField, number>> | null = null;
+    if (prevRow === null && Object.keys(backfillCheck.readings).length > 0) {
+      const anyEarlier = await this.db
+        .select({ id: records.id })
+        .from(records)
+        .where(lt(records.dutyDate, dutyDate))
+        .limit(1);
+      if (anyEarlier.length > 0) backfill = backfillCheck.readings;
+    }
+    const prevGet: FieldValueGetter = prevRow
+      ? (name) => {
+          const key = recordKeyOf(name, this.logger);
+          return key ? ((prevRow[key as keyof typeof prevRow] as unknown) ?? null) : null;
+        }
+      : (name) => backfill?.[name as PrevBackfillField] ?? null;
+
+    // 防呆判定（F1-12/F1-13，shared guard.ts 三端同源纯函数）：确认以归一后的 confirmCheck
+    // 为准（超长原因/非数组已在第 1 步 400 点名）；空白原因项已在归一时剔除（与未上送
+    // 同待，F1-12-T2「重试不放行」）；与命中项对不上号的确认在下方 filter 中不消费
+    // （防张冠李戴的确认解锁别的防呆项）
+    const confirmedDecrease = new Map<DecreasedGuardField, string>();
+    const confirmedRefill = new Map<1 | 2, string>();
+    for (const c of confirmCheck.normalized) {
+      if (c.type === 'reading_decreased') {
+        if (!confirmedDecrease.has(c.field)) confirmedDecrease.set(c.field, c.reason);
+      } else if (!confirmedRefill.has(c.card)) {
+        confirmedRefill.set(c.card, c.reason);
+      }
+    }
+    const cur: FieldValueGetter = (name) => sections[name] ?? null;
+    const decreased = decreasedReadingsOf(cur, prevGet);
+    const refills = refillCardsOf(cur, prevGet);
+    const needConfirm: ConfirmItem[] = [
+      ...decreased
+        .filter((d) => !confirmedDecrease.has(d.field))
+        .map((d) => ({
+          type: 'reading_decreased' as const,
+          field: d.field,
+          prev: d.prev,
+          current: d.current,
+          message: `本次读数 ${d.current} 小于上一班 ${d.prev}，请确认是否属实（换表底数/错抄须说明）`,
+        })),
+      ...refills
+        .filter((r) => !confirmedRefill.has(r.card))
+        .map((r) => ({
+          type: 'gas_refill' as const,
+          card: r.card,
+          prev: r.prev,
+          current: r.current,
+          message: `${r.card === 1 ? '主卡' : '副卡'}剩余量 ${r.current} 大于上一班 ${r.prev}，如已充气请确认`,
+        })),
+    ];
+    if (needConfirm.length > 0) {
+      // code 选择口径（契约订正 15）：回退与充气同时命中时 READINGS_DECREASED 优先
+      const hasDecreased = decreased.some((d) => !confirmedDecrease.has(d.field));
+      throw new ApiException(
+        hasDecreased ? 'READINGS_DECREASED' : 'GAS_REFILL_CONFIRMED',
+        '存在异常读数，请逐条确认后重新提交',
+        { needConfirm },
+      );
+    }
+    // 确认留痕清单（契约 §5「record.submit + 各确认原因」）：仅**命中项**的确认入账——
+    // 对未命中字段的确认不写审计（确认与防呆项一一对应，多行失真同覆盖重复项 L4 纪律）
+    const confirmAudits = [
+      ...decreased.map((d) => ({
+        type: 'reading_decreased' as const,
+        field: d.field as string,
+        card: null as 1 | 2 | null,
+        prev: d.prev,
+        current: d.current,
+        reason: confirmedDecrease.get(d.field) ?? '',
+      })),
+      ...refills.map((r) => ({
+        type: 'gas_refill' as const,
+        field: GAS_CARD_FIELDS[r.card] as string,
+        card: r.card as 1 | 2 | null,
+        prev: r.prev,
+        current: r.current,
+        reason: confirmedRefill.get(r.card) ?? '',
+      })),
+    ];
+
+    // 第 ③ 步（TK-13，契约 §4；评审修复轮 L1：移到校验/409 判定之后，无效与重复提交不白跑）：
+    // 用量由服务端计算固化；确认充气的卡经 refilled 按 0 计（D-P14，TK-14 确认后的取数层）；
+    // 手工覆盖（F3-04/F3-06，已过 validateUsageOverrides）在计算值之上改写。
+    const refilled = new Set<1 | 2>(
+      [...confirmedRefill.keys()].filter((card) => refills.some((r) => r.card === card)),
+    );
+    const usage = this.computeUsageValues(sections, prevGet, refilled);
     const overrides = this.applyUsageOverrides(overrideCheck.valid, usage.auto);
     Object.assign(usage.values, overrides.values);
 
@@ -821,6 +1026,35 @@ export class RecordsService {
           oldValue: { field: o.field, auto_value: o.auto },
           newValue: { field: o.field, value: o.value, version },
           reason: o.reason,
+        });
+      }
+
+      // 防呆确认留痕（TK-14，契约 §5「record.submit + 各确认原因」）：逐确认项一行，
+      // 原因记 reason 列，newValue 记命中项的上一班/本次值与版本（复核口径：确认的是
+      // 「当时看到什么」；仅命中项入账，confirmAudits 构造处已过滤未命中的确认）
+      for (const c of confirmAudits) {
+        await tx.insert(auditLogs).values({
+          actorId: user.id,
+          action: 'record.submit',
+          targetType: 'record',
+          targetId: recordNo,
+          newValue:
+            c.card === null
+              ? { type: c.type, field: c.field, prev: c.prev, current: c.current, version }
+              : { type: c.type, card: c.card, prev: c.prev, current: c.current, version },
+          reason: c.reason,
+        });
+      }
+
+      // 补录留痕（TK-14，F3-07/D-T19）：补录读数不落 records 列（缺失班次不建行，
+      // F6-06 漏交检测不受影响），审计存全量补录值供台账与双轨比对核对
+      if (backfill) {
+        await tx.insert(auditLogs).values({
+          actorId: user.id,
+          action: 'record.prev_backfill',
+          targetType: 'record',
+          targetId: recordNo,
+          newValue: { readings: backfill, version },
         });
       }
       return recordId;
