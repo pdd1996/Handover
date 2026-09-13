@@ -12,8 +12,10 @@
  */
 
 import type { FieldValueGetter } from './cards';
+import type { ConfirmItem, MissingField } from './errors';
+import { toMissingField } from './errors';
 import type { RecordFieldName } from './fields';
-import { parseNumeric } from './validation';
+import { numericMaxOf, parseNumeric } from './validation';
 
 /** F1-12 读数回退判定字段：累计走字表读数（本次 < 上一班 → 409 要求确认） */
 export const DECREASED_GUARD_FIELDS = ['water_reading', 'e1_reading', 'e2_reading'] as const;
@@ -82,4 +84,63 @@ export function refillCardsOf(cur: FieldValueGetter, prev: FieldValueGetter): Re
     if (current > base) items.push({ card, prev: base, current });
   }
   return items;
+}
+
+/**
+ * 未确认命中项 → 409 need_confirm 可解释清单（契约 §4 第 2 步，C-03 可解释文案的单一权威实现）。
+ * api 提交侧组装 409 与 h5 离线提交预检（TK-15）共用：离线时无服务端 409 补救路径，
+ * 确认收集必须前置到入队前——判定范围与文案若两端各写一套，离线入队的队列项会在
+ * 同步时刻被服务端 409 拒绝而滞留。confirmed* 为已带确认的命中项（重提时不重复要求确认）。
+ */
+export function unconfirmedNeedConfirmItems(
+  cur: FieldValueGetter,
+  prev: FieldValueGetter,
+  confirmedDecreased: ReadonlySet<DecreasedGuardField> = new Set(),
+  confirmedRefills: ReadonlySet<1 | 2> = new Set(),
+): ConfirmItem[] {
+  return [
+    ...decreasedReadingsOf(cur, prev)
+      .filter((d) => !confirmedDecreased.has(d.field))
+      .map((d): ConfirmItem => ({
+        type: 'reading_decreased',
+        field: d.field,
+        prev: d.prev,
+        current: d.current,
+        message: `本次读数 ${d.current} 小于上一班 ${d.prev}，请确认是否属实（换表底数/错抄须说明）`,
+      })),
+    ...refillCardsOf(cur, prev)
+      .filter((r) => !confirmedRefills.has(r.card))
+      .map((r): ConfirmItem => ({
+        type: 'gas_refill',
+        card: r.card,
+        prev: r.prev,
+        current: r.current,
+        message: `${r.card === 1 ? '主卡' : '副卡'}剩余量 ${r.current} 大于上一班 ${r.prev}，如已充气请确认`,
+      })),
+  ];
+}
+
+/**
+ * 补录上一班读数校验（TK-14 F3-07 / D-T19；TK-15 评审修复轮 L1 自 api records.service
+ * 下沉 shared）：合法键集 `PREV_BACKFILL_FIELDS`，白名单外键忽略（与 sections 同一口径）；
+ * 值须为十进制字面量且**非负、不超列容量上限**——脏基线不得进入 need_confirm 可解释文案
+ * 与 record.prev_backfill 审计（TK-14 修复轮 L1 实证 '-500' 曾流入）。校验与消费解耦：
+ * 垃圾值无论上一班是否缺失都不放行。api 提交侧与 h5 离线预检消费同一实现。
+ */
+export function validatePrevBackfillReadings(
+  input: Readonly<Partial<Record<PrevBackfillField, unknown>>> | undefined,
+): { outOfRange: MissingField[]; readings: Partial<Record<PrevBackfillField, number>> } {
+  const outOfRange: MissingField[] = [];
+  const readings: Partial<Record<PrevBackfillField, number>> = {};
+  for (const [name, raw] of Object.entries(input ?? {})) {
+    if (!PREV_BACKFILL_FIELDS.includes(name as PrevBackfillField)) continue;
+    const n = parseNumeric(raw);
+    const max = numericMaxOf(name as PrevBackfillField);
+    if (n === null || n < 0 || n > (max ?? Infinity)) {
+      outOfRange.push(toMissingField(name as PrevBackfillField));
+      continue;
+    }
+    readings[name as PrevBackfillField] = n;
+  }
+  return { outOfRange, readings };
 }
