@@ -94,7 +94,9 @@ async function injectFullDraft(page: Page, dutyDate: string): Promise<void> {
   await page.evaluate(
     ({ key, values }) =>
       new Promise<void>((resolve, reject) => {
-        const req = indexedDB.open('handover-h5', 1);
+        // 不带版本号开库：TK-15 起 DB_VERSION 升为 2（增 sync_queue store），硬编码版本号
+        // 会 VersionError；应用已先于本助手开库建表，onupgradeneeded 仅为兑底
+        const req = indexedDB.open('handover-h5');
         req.onupgradeneeded = () => {
           if (!req.result.objectStoreNames.contains('drafts')) {
             req.result.createObjectStore('drafts');
