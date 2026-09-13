@@ -21,17 +21,17 @@ import {
   localMeasuredAt,
   numericMaxOf,
   parseNumeric,
-  PREV_BACKFILL_FIELDS,
   refillCardsOf,
   roundToScaleOf,
   toMissingField,
+  unconfirmedNeedConfirmItems,
+  validatePrevBackfillReadings,
   validateFields,
   waterDayUseOf,
   type BadgeDto,
   type CardDef,
   type CardDto,
   type CardFieldStateDto,
-  type ConfirmItem,
   type ConfirmationPayload,
   type FieldValueGetter,
   type MissingField,
@@ -574,28 +574,14 @@ export class RecordsService {
   }
 
   /**
-   * 补录上一班读数校验（TK-14，F3-07；D-T19）：合法键集 shared `PREV_BACKFILL_FIELDS`，
-   * 白名单外键忽略（与 sections 同一口径）；值须为十进制字面量且**非负、不超列容量上限**
-   * （评审修复轮 L1：与 validateUsageOverrides 同口径——脏基线不再进入 need_confirm 可解释
-   * 文案与 record.prev_backfill 审计；读数无负值语义，下限 0 与 validation.ts 同门）。
-   * 校验与消费解耦：垃圾值无论上一班是否缺失都不放行（消费仅限缺失态，见 submit）。
+   * 补录上一班读数校验（TK-14，F3-07；D-T19）：实现已下沉 shared `guard.ts
+   * validatePrevBackfillReadings`（TK-15 评审修复轮 L1，h5 离线预检与 api 同一实现），
+   * 此处仅保留调用点签名。校验与消费解耦：垃圾值无论上一班是否缺失都不放行。
    */
   private validatePrevBackfill(
     input: Readonly<Partial<Record<PrevBackfillField, unknown>>> | undefined,
   ): { outOfRange: MissingField[]; readings: Partial<Record<PrevBackfillField, number>> } {
-    const outOfRange: MissingField[] = [];
-    const readings: Partial<Record<PrevBackfillField, number>> = {};
-    for (const [name, raw] of Object.entries(input ?? {})) {
-      if (!PREV_BACKFILL_FIELDS.includes(name as PrevBackfillField)) continue;
-      const n = parseNumeric(raw);
-      const max = numericMaxOf(name as PrevBackfillField);
-      if (n === null || n < 0 || n > (max ?? Infinity)) {
-        outOfRange.push(toMissingField(name as PrevBackfillField));
-        continue;
-      }
-      readings[name as PrevBackfillField] = n;
-    }
-    return { outOfRange, readings };
+    return validatePrevBackfillReadings(input);
   }
 
   /**
@@ -898,29 +884,17 @@ export class RecordsService {
     const cur: FieldValueGetter = (name) => sections[name] ?? null;
     const decreased = decreasedReadingsOf(cur, prevGet);
     const refills = refillCardsOf(cur, prevGet);
-    const needConfirm: ConfirmItem[] = [
-      ...decreased
-        .filter((d) => !confirmedDecrease.has(d.field))
-        .map((d) => ({
-          type: 'reading_decreased' as const,
-          field: d.field,
-          prev: d.prev,
-          current: d.current,
-          message: `本次读数 ${d.current} 小于上一班 ${d.prev}，请确认是否属实（换表底数/错抄须说明）`,
-        })),
-      ...refills
-        .filter((r) => !confirmedRefill.has(r.card))
-        .map((r) => ({
-          type: 'gas_refill' as const,
-          card: r.card,
-          prev: r.prev,
-          current: r.current,
-          message: `${r.card === 1 ? '主卡' : '副卡'}剩余量 ${r.current} 大于上一班 ${r.prev}，如已充气请确认`,
-        })),
-    ];
+    // 需确认清单组装下沉 shared（TK-15：h5 离线提交预检与 api 同源，判定范围与文案单一权威实现）；
+    // decreased/refills 本身仍供下方确认留痕清单与充气取数层（refilled）消费
+    const needConfirm = unconfirmedNeedConfirmItems(
+      cur,
+      prevGet,
+      new Set(confirmedDecrease.keys()),
+      new Set(confirmedRefill.keys()),
+    );
     if (needConfirm.length > 0) {
       // code 选择口径（契约订正 15）：回退与充气同时命中时 READINGS_DECREASED 优先
-      const hasDecreased = decreased.some((d) => !confirmedDecrease.has(d.field));
+      const hasDecreased = needConfirm.some((c) => c.type === 'reading_decreased');
       throw new ApiException(
         hasDecreased ? 'READINGS_DECREASED' : 'GAS_REFILL_CONFIRMED',
         '存在异常读数，请逐条确认后重新提交',
