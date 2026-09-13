@@ -15,6 +15,7 @@ import type { RecordStatus } from './enums';
 import type { UsageFieldName } from './calc';
 import type { RecordFieldName } from './fields';
 import type { SectionNo } from './sections';
+import type { PrevBackfillField } from './guard';
 import type { ConfirmationPayload, DutyGuardConfirm, MissingField } from './errors';
 
 // ── 契约 §3.2 GET /records/today（今日交接首页；F1-01、F1-02、F1-03）─────────
@@ -201,6 +202,14 @@ export interface SubmitPayloadDto {
   confirmations?: readonly ConfirmationPayload[];
   /** 排班安全阀确认（TK-26 消费，F6-05）；本阶段仅接收 */
   duty_guard_confirm?: DutyGuardConfirm;
+  /**
+   * 补录上一班读数（TK-14，F3-07）：上一班缺失（GET /records/today/prev 返回 prev=null
+   * 且非首班，D-T17 缺失态）时师傅补录的相邻班次读数。合法键集 shared `PREV_BACKFILL_FIELDS`
+   * （防呆比对基线 + 用量计算的五个比对字段）。服务端**仅在缺失态消费**：有相邻班次已提交
+   * 记录时忽略（防客户端缓存串台）、首班（first_day）无缺失态同样忽略；补录值不落 records
+   * 列（缺失班次不建行，不伪造当日记录），以审计 `record.prev_backfill` 留痕（D-T19）。
+   */
+  prev_readings?: Readonly<Partial<Record<PrevBackfillField, unknown>>>;
 }
 
 /**

@@ -124,16 +124,22 @@ export function eDayUseOf(get: FieldValueGetter, prev: FieldValueGetter): LineUs
  *
  * 剩余量增大（充气）的负差**原样返回不夹逼**：「充气确认后该卡当日用量按 0 计、另一卡
  * 正常计算」（D-P14/技术方案修订 2）是**防呆确认成立后**的取数规则，属 TK-14 判定层——
- * 本函数在未确认时按原始差值返回，TK-14 接入 `confirmations` 后按卡清零再合计。
+ * 本函数在未确认时按原始差值返回，TK-14 接入 `confirmations` 后经 `refilled` 参数按卡清零
+ * 再合计（清零行不参与负差，total 按清零后的两线重算）。
  */
-export function gasDayUseOf(get: FieldValueGetter, prev: FieldValueGetter): LineUse | null {
+export function gasDayUseOf(
+  get: FieldValueGetter,
+  prev: FieldValueGetter,
+  refilled?: ReadonlySet<1 | 2>,
+): LineUse | null {
   const c1 = parseNumeric(get('g1_remaining'));
   const b1 = parseNumeric(prev('g1_remaining'));
   const c2 = parseNumeric(get('g2_remaining'));
   const b2 = parseNumeric(prev('g2_remaining'));
   if (c1 === null || b1 === null || c2 === null || b2 === null) return null;
-  const line1 = Math.round((b1 - c1) * METER_SCALE) / METER_SCALE;
-  const line2 = Math.round((b2 - c2) * METER_SCALE) / METER_SCALE;
+  // 确认充气的卡按 0 计（D-P14），未确认的卡保持原始差值（负差原样，便于复核）
+  const line1 = refilled?.has(1) ? 0 : Math.round((b1 - c1) * METER_SCALE) / METER_SCALE;
+  const line2 = refilled?.has(2) ? 0 : Math.round((b2 - c2) * METER_SCALE) / METER_SCALE;
   return { line1, line2, total: Math.round((line1 + line2) * METER_SCALE) / METER_SCALE };
 }
 

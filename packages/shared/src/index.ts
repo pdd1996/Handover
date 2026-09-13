@@ -22,6 +22,7 @@ export * from './dto';
 export * from './errors';
 export * from './validation';
 export * from './calc';
+export * from './guard';
 
 import type { ApiError, MissingField } from './errors';
 import { toMissingField } from './errors';
