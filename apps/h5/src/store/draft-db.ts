@@ -13,15 +13,20 @@
  * 容错口径：IndexedDB 不可用（隐私模式/存储被禁）时静默降级——写失败返回 false、读失败返回 null，
  * 不抛出、不弹错，退化为 TK-06 的会话内草稿边界（刷新丢失），**不得阻塞填写**（C-01 填写效率优先）。
  *
- * 挂账：① EVT-06（埋点清单）需草稿携带 `last_edit_ts`，存储体届时补时间戳字段（TK-30）；
- * ② TK-15 增待同步队列/照片暂存区 store 时必须 bump `DB_VERSION`（现无 onversionchange 处理，
- * 升版前需补 blocked 回调）。
+ * 挂账：① EVT-06（埋点清单）需草稿携带 `last_edit_ts`，存储体届时补时间戳字段（TK-30）。
+ * ② TK-15 已兑现：DB_VERSION 1→2 增 `sync_queue` store（待同步队列），并补 `onblocked`
+ * 回调（多标签页持旧连接时升版被阻塞，提示用户关闭其它页面；此前无处理会静默卡死）。
+ * 照片暂存区 store 属 Phase 2（F7/TK-36），随其落地再升版，不在本层预留空 store。
  */
 import type { PrevBackfillField, RecordFieldName } from '@handover/shared';
 
 const DB_NAME = 'handover-h5';
-const DB_VERSION = 1;
-const STORE = 'drafts';
+const DB_VERSION = 2;
+/** 开库超时（评审修复轮 L4）：覆盖升版被阻塞的窗口，超限按存储不可用降级 */
+const OPEN_TIMEOUT_MS = 8000;
+export const STORE_DRAFTS = 'drafts';
+/** 待同步队列（TK-15，F1-06/F1-07）：离线提交的交接单在本机排队，恢复网络后按序上传 */
+export const STORE_SYNC_QUEUE = 'sync_queue';
 
 /**
  * 草稿值形状：字段名 → 原值（数值为字符串，与 store/draft.ts 暂存口径一致；JSON 可克隆）。
@@ -46,38 +51,74 @@ function openDb(): Promise<IDBDatabase> {
   if (!dbPromise) {
     dbPromise = new Promise((resolve, reject) => {
       const req = indexedDB.open(DB_NAME, DB_VERSION);
-      req.onupgradeneeded = () => {
-        if (!req.result.objectStoreNames.contains(STORE)) req.result.createObjectStore(STORE);
+      // 开库超时（评审修复轮 L4）：升版被其它标签页持旧连接阻塞时，request 会无限期
+      // pending，若不设超时本 Promise 永不 settle，缓存后草稿层与队列层**全部**操作
+      // 永久挂起（提交按钮永久 loading、draft-saved 永不点亮）。超时后 reject，
+      // 调用方落到既有的静默降级路径（入队显式提示「存储不可用」）
+      const timer = setTimeout(
+        () => reject(new Error('IndexedDB 打开超时（可能被其它标签页阻塞）')),
+        OPEN_TIMEOUT_MS,
+      );
+      const settle = <T>(fn: () => T): T => {
+        clearTimeout(timer);
+        return fn();
       };
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error ?? new Error('IndexedDB 打开失败'));
+      req.onupgradeneeded = () => {
+        if (!req.result.objectStoreNames.contains(STORE_DRAFTS))
+          req.result.createObjectStore(STORE_DRAFTS);
+        if (!req.result.objectStoreNames.contains(STORE_SYNC_QUEUE))
+          req.result.createObjectStore(STORE_SYNC_QUEUE);
+      };
+      // 升版被阻塞（另一标签页持旧版本连接）时显式暴露：静默卡死会让待同步队列
+      // 看似可用实则写不进，比报错更危险（TK-15 兑现 TK-08 挂账）
+      req.onblocked = () => console.warn('IndexedDB 升版被阻塞：请关闭本系统的其它标签页后重试');
+      req.onsuccess = () => {
+        const db = req.result;
+        // 评审修复轮 L4（TK-08 挂账另一半）：其它标签页发起升版时主动放行——
+        // 关闭自身连接并重置缓存，下次操作按新版本重开，避免旧连接钉死新版本
+        db.onversionchange = () => {
+          db.close();
+          dbPromise = null;
+        };
+        settle(() => resolve(db));
+      };
+      req.onerror = () => settle(() => reject(req.error ?? new Error('IndexedDB 打开失败')));
     });
   }
   return dbPromise;
 }
 
-function withStore<T>(
+/** 通用单 store 事务执行器（草稿层与待同步队列共用同一库连接） */
+export function idbWithStore<T>(
+  storeName: string,
   mode: IDBTransactionMode,
   run: (store: IDBObjectStore) => IDBRequest<T>,
 ): Promise<T> {
   return openDb().then(
     (db) =>
       new Promise<T>((resolve, reject) => {
-        const t = db.transaction(STORE, mode);
-        const req = run(t.objectStore(STORE));
+        const t = db.transaction(storeName, mode);
+        const req = run(t.objectStore(storeName));
         const fail = (): void => reject(t.error ?? req.error ?? new Error('IndexedDB 操作失败'));
         if (mode === 'readonly') {
           req.onsuccess = () => resolve(req.result);
           req.onerror = fail;
         } else {
           // 写操作以**事务提交**为准：request.onsuccess 时事务尚未 commit，页面随即关闭仍可能丢——
-          // 「草稿已自动保存」指示不得早于提交点亮（TK-08 评审 M3）
+          // 「草稿已自动保存」指示不得早于提交点亮（TK-08 评审 M3）；待同步队列入队同理
           t.oncomplete = () => resolve(req.result);
           t.onerror = fail;
           t.onabort = fail;
         }
       }),
   );
+}
+
+function withStore<T>(
+  mode: IDBTransactionMode,
+  run: (store: IDBObjectStore) => IDBRequest<T>,
+): Promise<T> {
+  return idbWithStore(STORE_DRAFTS, mode, run);
 }
 
 /** 读草稿；无存档或存储不可用返回 null（调用方按「无草稿」处理，不区分失败） */

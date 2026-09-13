@@ -30,8 +30,18 @@ const props = defineProps<{
   /** 是否可提交（TK-12 评审修复轮 L1/M6）：提交是师傅端写操作（契约 §3.2 master），
    * 科长巡查不显入口；且撤回重提（draft 态）需重现入口 */
   canSubmit?: boolean;
+  /** 本机待同步队列非空（TK-15）：与接口 pending_sync OR 合并出同步状态（F1-06 全程可见） */
+  pendingSync?: boolean;
+  /** 待同步队列深度（横幅文案） */
+  queueCount?: number;
+  /** 排空中（排空按钮 loading 与同步角标） */
+  syncing?: boolean;
 }>();
-defineEmits<{ (e: 'open', key: string): void; (e: 'submit'): void }>();
+defineEmits<{
+  (e: 'open', key: string): void;
+  (e: 'submit'): void;
+  (e: 'sync'): void;
+}>();
 
 const { getValue: getDraft } = useDraft();
 
@@ -128,12 +138,14 @@ const recordText = computed(() =>
 );
 
 /**
- * 同步状态。**TK-05 阶段恒显示「已同步」**：接口的 `pending_sync` 是占位 false
- * （离线待同步队列存于本机 IndexedDB，服务器零感知——F1-07-T2），真值待 TK-15 离线三层缓冲
- * 落地后由本地待同步队列 OR 合并（草稿层不产生待同步语义，见决策记录 D-T18）。
- * 此处保留 UI 位以免后续改布局。
+ * 同步状态（F1-06「同步状态全程可见」，TK-15 落地）：接口 `pending_sync`（占位 false，
+ * 服务器对客户端队列零感知——F1-07-T2）OR 本机待同步队列；排空中显「同步中…」。
+ * 待同步语义只由队列产生（草稿层不产生，决策记录 D-T18/D-T20）。
  */
-const syncText = computed(() => (props.today.pending_sync ? '待同步' : '已同步'));
+const syncText = computed(() => {
+  if (props.syncing) return '同步中…';
+  return props.today.pending_sync || props.pendingSync ? '待同步' : '已同步';
+});
 </script>
 
 <template>
@@ -180,6 +192,26 @@ const syncText = computed(() => (props.today.pending_sync ? '待同步' : '已�
     </div>
 
     <div class="px-3">
+      <!-- 待同步队列横幅（TK-15，F1-06/F1-07）：同步状态全程可见 + 手动排空入口 -->
+      <div
+        v-if="pendingSync"
+        class="mt-3 flex items-center justify-between rounded-xl bg-amber-50 px-3 py-2.5"
+        data-testid="sync-banner"
+      >
+        <div class="pr-2 text-sm text-amber-700">
+          有 {{ queueCount ?? 0 }} 张交接单在本机待同步，回到院内网络后自动上传
+        </div>
+        <van-button
+          size="small"
+          type="warning"
+          :loading="syncing"
+          data-testid="sync-now"
+          @click="$emit('sync')"
+        >
+          立即同步
+        </van-button>
+      </div>
+
       <!-- 巡检动线提示（对齐 demo v0.3 首页提示语：按巡检路线到点位点开卡片） -->
       <div class="my-3 text-sm leading-relaxed text-slate-600">
         按巡检路线到点位点开卡片填写即可，内容自动暂存、随时退出；
@@ -208,11 +240,21 @@ const syncText = computed(() => (props.today.pending_sync ? '待同步' : '已�
            已提交/异议/完成时隐藏——一天一条（F1-01），重提仅随撤回（TK-21）路径出现；
            仅 master 可见（评审 L1：科长巡查不再看到点了就 403 的死按钮） -->
       <div v-if="canSubmit && (!today.record || today.record.status === 'draft')" class="mt-5">
-        <van-button block type="danger" data-testid="submit-open" @click="$emit('submit')">
+        <van-button
+          block
+          type="danger"
+          :disabled="syncing"
+          data-testid="submit-open"
+          @click="$emit('submit')"
+        >
           提交交接单
         </van-button>
         <div class="mt-1.5 text-center text-xs text-slate-400">
-          提交前先预览未填项与异常项，提交后生成本班次正式交接单
+          {{
+            syncing
+              ? '正在同步待同步队列，请稍候…'
+              : '提交前先预览未填项与异常项，提交后生成本班次正式交接单'
+          }}
         </div>
       </div>
     </div>

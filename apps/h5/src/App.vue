@@ -11,14 +11,24 @@
  * 认证走 HttpOnly Cookie（契约 §1、D-T13）：令牌由浏览器自动携带，前端不持有；
  * 刷新页面后靠 GET /auth/me 恢复登录态（401 则回登录页）。
  */
-import { computed, nextTick, onMounted, ref } from 'vue';
+import { computed, nextTick, onMounted, ref, watch } from 'vue';
 import { showToast } from 'vant';
 import {
   CARD_BY_FIELD,
+  FIELD_BY_NAME,
+  FIELD_NAMES,
+  buildValidationError,
   isFilledValue,
+  DECREASED_GUARD_FIELDS,
   PREV_BACKFILL_FIELDS,
+  toMissingField,
+  unconfirmedNeedConfirmItems,
+  validateFields,
+  validatePrevBackfillReadings,
   type ConfirmItem,
   type ConfirmationPayload,
+  type DecreasedGuardField,
+  type FieldValueGetter,
   type FormOptionsDto,
   type MissingField,
   type PrevBackfillField,
@@ -28,10 +38,23 @@ import {
   type TodayDto,
   type UsageOverridePayload,
 } from '@handover/shared';
-import { ApiRequestError, api, type AuthUser } from './api/client';
+import { ApiRequestError, NetworkError, api, type AuthUser } from './api/client';
 import TodayView from './views/TodayView.vue';
 import SectionView from './views/SectionView.vue';
 import { useDraft } from './store/draft';
+import {
+  enqueueQueueItem,
+  getQueueItem,
+  loadQueueItems,
+  patchQueueItem,
+  queueItemKey,
+  queueTimestamp,
+  removeQueueItem,
+  type SyncQueueItem,
+} from './store/sync-queue';
+
+/** L2（评审修复轮）：业务拒绝达此次数后停止自动重试，留存待科长处置（防无限循环） */
+const MAX_DRAIN_ATTEMPTS = 5;
 
 const draft = useDraft();
 
@@ -69,6 +92,52 @@ const prevCache = ref<{ dutyDate: string; dto: PrevDto } | null>(null);
 const configs = ref<FormOptionsDto | null>(null);
 
 /**
+ * 待同步队列（TK-15，F1-06/F1-07）：离线提交的交接单在本机 IndexedDB 排队（服务器零感知，
+ * F1-07-T2），恢复网络后自动上传（D-P07 排队送达，顺序即提交顺序）。本 ref 是 UI 展示与
+ * 排空引擎的内存镜像，任何队列变动后经 refreshQueue 重读。EVT-04/EVT-05 埋点挂 TK-30。
+ */
+const queueItems = ref<SyncQueueItem[]>([]);
+const syncing = ref(false);
+/**
+ * 会话代次（评审修复轮 M5）：resetSession 自增；排空循环内比对，登出/被动 401 后
+ * 立即放弃本轮，不得再触达已清空的 user/today。
+ */
+let sessionEpoch = 0;
+/** M4（评审修复轮）：排空在途期间发生过草稿补改（不可能进入已上传/在传的快照） */
+let patchedDuringSync = false;
+/** L5（评审修复轮）：本机全部待同步单数（不分账号、不含内容）——登录页提示用 */
+const deviceQueueCount = ref(0);
+/** F1-14 强提醒的会话内已知晓标记（M1 修复轮：跨班次单不可由师傅同步，提醒可确认后收起） */
+const syncRemindAck = ref(false);
+
+async function refreshQueue(): Promise<void> {
+  queueItems.value = user.value ? await loadQueueItems(user.value.id) : [];
+}
+
+/** L5：本机（不分账号）待同步单计数；登录页据此提示「请用原账号登录完成同步」 */
+async function refreshDeviceQueueCount(): Promise<void> {
+  deviceQueueCount.value = (await loadQueueItems()).length;
+}
+
+/**
+ * F1-14 强提醒口径：队列项的班次日期早于当前班次（滞留过夜/跨班次未同步）。以 duty_date
+ * 而非入队自然日比较——班次分界（C-08，08:30）之后的同日滞留同样意味着该单已不属于当前
+ * 班次，是强提醒的正确触发点；打开页面首要展示。**处置口径（评审修复轮 M1，D-T20 修订）**：
+ * 跨班次滞留单**不可由师傅同步**（服务端 submit 只认当前班次，上传必然落错日期），overlay
+ * 给出「需科长处理」指引，师傅确认后收起（会话内不再重复弹出，队列项保留、数据不丢）。
+ */
+const staleQueueItems = computed(() => {
+  const duty = today.value?.duty_date;
+  if (!duty) return [];
+  return queueItems.value.filter((i) => i.duty_date < duty);
+});
+const showSyncRemind = computed(() => staleQueueItems.value.length > 0 && !syncRemindAck.value);
+/** L2：是否有多次同步失败的单（overlay 内提示联系科长，不新增交互面） */
+const hasHardFailedItems = computed(() =>
+  queueItems.value.some((i) => i.attempts >= 3 || i.last_error !== null),
+);
+
+/**
  * 登录态清理**单一入口**（TK-06 评审遗漏一，二次评审订正）：**已建立登录态后的失效**——
  * 被动掉线（handleSessionLoss 的 401 分支：会话过期/账号被停用）与主动登出（onLogout）、
  * 以及启动恢复失败（bootstrap 的静默 catch）都必须走这里；清空项新增/删减只改本函数，
@@ -85,7 +154,12 @@ function resetSession(): void {
   prevInfo.value = null;
   prevCache.value = null;
   configs.value = null;
+  queueItems.value = [];
+  syncing.value = false; // M5（评审修复轮）：登出/会话失效打断在途排空，不得残留锁
+  sessionEpoch += 1;
+  syncRemindAck.value = false;
   draft.clearMemory();
+  void refreshDeviceQueueCount(); // L5：回登录页时统计本机未同步单（不含内容）
 }
 
 /**
@@ -144,6 +218,11 @@ async function loadToday(): Promise<void> {
     if (user.value && (await draft.restore(user.value.id, today.value.duty_date))) {
       showToast('已恢复本班次未提交的草稿');
     }
+    // TK-15：登录态/班次就绪后重读待同步队列并顺势自动排空（到院内网打开页面的常态路径）。
+    // M1（评审修复轮）：跨班次滞留单在排空内被跳过（不可上传），强提醒 overlay 与自动排空
+    // 不再互斥——滞留项永远不会被自动传走，提醒首要展示的语义由 overlay 自身保证
+    await refreshQueue();
+    if (queueItems.value.length > 0) void drainQueue(true);
   } catch (err) {
     notify(err);
   } finally {
@@ -175,6 +254,7 @@ async function bootstrap(): Promise<void> {
     resetSession();
   } finally {
     booting.value = false;
+    void refreshDeviceQueueCount(); // L5：登录页可能需要展示「本机有未同步单」
   }
 }
 
@@ -209,8 +289,12 @@ async function onLogout(): Promise<void> {
   resetSession();
 }
 
-/** 打开板块填写页（F1-02-T2） */
+/** 打开板块填写页（F1-02-T2）；M4（评审修复轮）：同步在途不开新卡，压缩在途补改窗口 */
 function openCard(key: string): void {
+  if (syncing.value) {
+    showToast('正在同步，请稍候');
+    return;
+  }
   activeCardKey.value = key;
 }
 
@@ -231,6 +315,8 @@ async function backToToday(): Promise<void> {
 const showPreview = ref(false);
 const preview = ref<PreviewDto | null>(null);
 const submitting = ref(false);
+/** 离线预检模式（TK-15）：预览来自本地 shared 校验引擎而非服务端，提交走向本机待同步队列 */
+const offlinePreviewMode = ref(false);
 
 /**
  * 防呆确认（TK-14，F1-12/F1-13）：submit 返 409 时服务端在 `need_confirm` 下发命中清单
@@ -282,12 +368,230 @@ function buildPayload(): SubmitPayloadDto {
   return payload;
 }
 
+/**
+ * 离线预检（TK-15，F1-07）：网络不可用时的本地降级预览——与服务端 preview 同口径：
+ * shared validateFields 同一引擎（F1-08）、用量覆盖原因空白同 F3-06-T2 点名、异常项同
+ * abnormalFieldsOf 口径（状态选「坏」，enums OkBadStatus）。接班人修改原因的条件必填
+ * 不参与（h5 无人员候选接口不显式上送 receiver_id，挂 TK-26）。
+ */
+function offlinePreviewOf(): PreviewDto {
+  const payload = buildPayload();
+  const sections = payload.sections as Record<string, unknown>;
+  const get: FieldValueGetter = (name) => sections[name] ?? null;
+  const result = validateFields(
+    FIELD_NAMES.filter((name) => name !== 'receiver_change_reason'),
+    get,
+  );
+  const missing = [...result.missing];
+  if (payload.usage_overrides?.some((o) => o.field === 'lo_day_use' && !String(o.reason).trim())) {
+    missing.push(toMissingField('lo_day_use'));
+  }
+  // L1（评审修复轮）：补录读数合法性纳入离线预检（shared validatePrevBackfillReadings
+  // 与 api 同一实现）——脏基线不再拖到同步时刻被 400 拒而滞留。枚举越值与 confirmations
+  // 超长两段不参与：前者控件候选取自 shared 常量无漂移源，后者受 maxlength=200 约束
+  const outOfRange = [...result.outOfRange];
+  outOfRange.push(...validatePrevBackfillReadings(payload.prev_readings).outOfRange);
+  const body = buildValidationError({ missing, outOfRange });
+  return {
+    duty_date: today.value?.duty_date ?? '',
+    missing_fields: body ? body.missing_fields : [],
+    abnormal_fields: FIELD_NAMES.filter(
+      (name) => FIELD_BY_NAME[name].kind === 'status' && sections[name] === 'bad',
+    ).map(toMissingField),
+  };
+}
+
+/**
+ * 离线防呆预检（TK-15）：shared guard 同源判定 + need_confirm 组装（与 api 提交侧同一
+ * unconfirmedNeedConfirmItems），基线取本机缓存的上一班带出（prevInfo，App 级缓存），
+ * 缺失态以本机补录值兑底（与服务端 prev_readings 消费同向）。离线无服务端 409 补救
+ * 路径，确认收集必须前置到入队前——否则队列项会在同步时刻被 409 拒绝而滞留。
+ */
+function offlineNeedConfirm(): ConfirmItem[] {
+  const payload = buildPayload();
+  const sections = payload.sections as Record<string, unknown>;
+  const cur: FieldValueGetter = (name) => sections[name] ?? null;
+  const prevGet: FieldValueGetter = (name) => {
+    const fromPrev = prevInfo.value?.prev?.readings?.[name];
+    return fromPrev != null
+      ? fromPrev
+      : (payload.prev_readings?.[name as PrevBackfillField] ?? null);
+  };
+  // M6（评审修复轮）：会话内已收集的确认**按项扣除**，只报本轮新增未确认项——
+  // 原实现「collectedConfirms 非空即整块跳过预检」，改后的新回退读数会带着旧确认
+  // 入队，服务端按 field 消费即绕过防呆（探针 P3 实证）
+  const confirmedDecreased = new Set<DecreasedGuardField>();
+  const confirmedRefills = new Set<1 | 2>();
+  for (const c of collectedConfirms.value) {
+    if (
+      c.type === 'reading_decreased' &&
+      c.field &&
+      (DECREASED_GUARD_FIELDS as readonly string[]).includes(c.field)
+    ) {
+      confirmedDecreased.add(c.field as DecreasedGuardField);
+    } else if (c.type === 'gas_refill' && c.card) {
+      confirmedRefills.add(c.card);
+    }
+  }
+  return unconfirmedNeedConfirmItems(cur, prevGet, confirmedDecreased, confirmedRefills);
+}
+
+/**
+ * 离线入队（F1-07-T1）：离线「提交」仅进本机待同步队列并提示——**尚未完成交接**
+ * （D-P07：上传成功那一刻才算正式提交）。持久草稿不清（清除时点=同步成功，D-T18
+ * 修订 #9 同源）；队列项 payload 随草稿自动保存刷新（D-T20）。EVT-04 sync_queued 挂 TK-30。
+ */
+async function enqueueOffline(): Promise<void> {
+  if (!user.value || !today.value) return;
+  const item: SyncQueueItem = {
+    id: queueItemKey(user.value.id, today.value.duty_date),
+    user_id: user.value.id,
+    duty_date: today.value.duty_date,
+    payload: buildPayload(),
+    queued_at: queueTimestamp(),
+    attempts: 0,
+    last_error: null,
+  };
+  // m2（评审修复轮）：同班次重提保留既有诊断（attempts/last_error）——否则反复入队
+  // 会抹掉「上次同步失败原因」，滞留单在强提醒里失去可解释性；归零只随一次同步成功
+  const existing = await getQueueItem(item.id);
+  item.attempts = existing?.attempts ?? 0;
+  item.last_error = existing?.last_error ?? null;
+  const ok = await enqueueQueueItem(item);
+  await refreshQueue();
+  showPreview.value = false;
+  offlinePreviewMode.value = false;
+  pendingConfirms.value = null;
+  if (ok) {
+    // M6（评审修复轮）：入队快照已携带本轮确认，会话内必须归零——否则它们会附着到
+    // 后续提交（含在线重提），被服务端按 field 消费而绕过防呆（探针 P3 实证路径）
+    collectedConfirms.value = [];
+    showToast('尚未完成交接，请回到院内网络完成同步');
+  } else {
+    showToast('当前离线且本机存储不可用，交接单未能暂存，请勿关闭页面');
+  }
+  void refreshDeviceQueueCount(); // L5：本机未同步单数变化
+}
+
+/**
+ * 排空待同步队列（TK-15，F1-06「恢复网络自动上传」）：按 queued_at 升序逐单上传
+ * （排队送达，D-T10），上传成功才算正式提交（D-P07）。失败分类（评审修复轮 M1/M2/M5）：
+ * - 跨班次滞留单 → **禁止上传**（服务端 submit 只认当前班次 C-08，上传必然落错日期），
+ *   固化为「需科长处理」并跳过（D-T20 修订；补交能力待决策定案）；
+ * - 网络仍不可用 → 停止本轮（队列原状，恢复后重试）；手动触发时显式提示（L3）；
+ * - 401 会话失效 → 并入 handleSessionLoss 单一入口后停止；
+ * - RECORD_EXISTS 409 → 仅同班次语义下自愈移除（M2：跨班次项根本不会被上传）；
+ * - 其余 400/409（校验/防呆）→ 原因固化在队列项并继续后续单；达重试上限（L2）后
+ *   停止自动重试，留存待科长处置。EVT-05 sync_result 埋点挂 TK-30。
+ */
+async function drainQueue(silent = false): Promise<void> {
+  if (syncing.value || !user.value || !today.value) return; // M3：today 未就绪不排空
+  const uid = user.value.id; // M5：循环内不再触达 user.value（跨 await 后可空）
+  const epoch = sessionEpoch;
+  syncing.value = true;
+  patchedDuringSync = false;
+  let draftClearFailed = false;
+  let synced = 0;
+  let skippedStale = 0;
+  let blockedByNetwork = false;
+  /** 已确认上传成功的班次集合：无论本轮是否中途失效（登出/401），退出前统一冲账清草稿 */
+  const submittedDuties = new Set<string>();
+  try {
+    for (const item of await loadQueueItems(uid)) {
+      if (epoch !== sessionEpoch || !user.value || !today.value) break; // M5：会话已失效
+      if (item.duty_date !== today.value.duty_date) {
+        // M1（评审修复轮）：跨班次滞留单不可上传，固化为「需科长处理」
+        skippedStale += 1;
+        await patchQueueItem(item.id, {
+          last_error: `该单属班次 ${item.duty_date}，已过班次分界，需科长处理`,
+        });
+        continue;
+      }
+      if (item.attempts >= MAX_DRAIN_ATTEMPTS) continue; // L2：停止自动重试，留存待处置
+      try {
+        await api.submit(item.payload);
+        await removeQueueItem(item.id);
+        synced += 1;
+        submittedDuties.add(item.duty_date);
+      } catch (err) {
+        if (err instanceof NetworkError) {
+          blockedByNetwork = true; // 网络仍不可用：正常中止本轮，队列原状
+          break;
+        }
+        if (!(err instanceof ApiRequestError)) {
+          // M5（评审修复轮）：编程错误不得伪装成网络失败静默吞掉
+          console.error('drainQueue 内部错误', err);
+          await patchQueueItem(item.id, {
+            attempts: item.attempts + 1,
+            last_error: '同步发生内部错误，请重试或联系管理员',
+          });
+          break;
+        }
+        if (err.status === 401) {
+          handleSessionLoss(err);
+          break;
+        }
+        if (err.status === 409 && err.body.code === 'RECORD_EXISTS') {
+          // M2（评审修复轮）：自愈仅在同班次语义下成立（跨班次项已在上方被拦截），
+          // 此时 409 才真正等价于「该班次已有已提交记录」（换设备已同步等）
+          await removeQueueItem(item.id);
+          synced += 1;
+          continue;
+        }
+        if (
+          !(await patchQueueItem(item.id, {
+            attempts: item.attempts + 1,
+            last_error: err.body.message,
+          }))
+        ) {
+          showToast('同步失败原因记录失败（本机存储不可用）'); // L6
+        }
+      }
+    }
+    // D-T18 修订 #9 / D-T20：清除时点 = 该班次出现已提交记录——**统一冲账**（M3 修复轮）
+    // 放在循环外：即便本轮中途会话失效（登出/401），已确认上传成功的班次草稿也必须清除，
+    // 否则旧草稿复活压服务端真值；markSubmitted 按用户+班次 keying，不依赖存活会话。
+    // 清除失败必须可见，与在线提交路径同口径
+    for (const d of submittedDuties) {
+      if (!(await draft.markSubmitted(uid, d))) draftClearFailed = true;
+    }
+    await refreshQueue();
+    if (draftClearFailed) showToast('本机草稿清除失败，请重开页面核对');
+    if (user.value && synced > 0) {
+      // M4（评审修复轮）：同步在途期间的补改不可能包含在已上传快照中，显式可见（C-09）
+      const note = patchedDuringSync ? '；注意：同步期间的新修改未包含在交接单中，请核对' : '';
+      showToast(`同步成功，交接单已正式提交${synced > 1 ? ` ${synced} 张` : ''}${note}`);
+      collectedConfirms.value = []; // M6：已消费的确认不得附着到后续提交
+      await loadToday();
+    } else if (user.value && !silent && blockedByNetwork) {
+      // L3（评审修复轮）：手动同步但网络仍不可达，必须给出反馈
+      showToast(`仍无法连接院内网络，本机待同步 ${queueItems.value.length} 张`);
+    } else if (user.value && !silent && skippedStale > 0) {
+      showToast(`有 ${skippedStale} 张交接单已过班次分界，需科长处理`);
+    }
+  } finally {
+    syncing.value = false;
+  }
+}
+
 async function onOpenPreview(): Promise<void> {
+  if (syncing.value) {
+    showToast('正在同步，请稍候'); // M4（评审修复轮）：同步在途不接受新提交
+    return;
+  }
   try {
     preview.value = await api.preview(buildPayload());
+    offlinePreviewMode.value = false;
     showPreview.value = true;
   } catch (err) {
-    notify(err);
+    if (err instanceof ApiRequestError) {
+      notify(err);
+      return;
+    }
+    // 网络不可用（TK-15）：预览降级为本地同口径预检（shared 校验引擎），提交走向本机队列
+    preview.value = offlinePreviewOf();
+    offlinePreviewMode.value = true;
+    showPreview.value = true;
   }
 }
 
@@ -317,6 +621,7 @@ async function onConfirmSubmit(): Promise<void> {
     // （评审修复轮 L2：静默吞掉会让旧草稿在重开页面后压过服务端真值）
     const cleared = await draft.markSubmitted(user.value!.id, today.value.duty_date);
     showPreview.value = false;
+    offlinePreviewMode.value = false;
     collectedConfirms.value = [];
     pendingConfirms.value = null;
     showToast(
@@ -326,6 +631,22 @@ async function onConfirmSubmit(): Promise<void> {
     );
     await loadToday(); // 重取汇总：首页状态转「已提交」、提交入口随之隐藏
   } catch (err) {
+    if (err instanceof NetworkError) {
+      // 网络不可用（TK-15，F1-07）：离线提交仅入本机待同步队列（D-P07 上传成功才算正式提交）。
+      // M6（评审修复轮）：预检**始终执行**，已确认项按项扣除（confirmed 集传入），只对
+      // 本轮新增未确认项要求确认——原「收过一次确认就整块跳过」会让新回退读数带着旧
+      // 确认入队，服务端按 field 消费即绕过防呆（探针 P3 实证）
+      const items = offlineNeedConfirm();
+      if (items.length > 0) {
+        showPreview.value = false;
+        offlinePreviewMode.value = false;
+        pendingConfirms.value = items;
+        confirmReasons.value = {};
+        return;
+      }
+      await enqueueOffline();
+      return;
+    }
     if (err instanceof ApiRequestError && err.status === 400 && err.body.missing_fields) {
       // 服务端复验拦下（C-09）：把点名清单回填预览弹窗逐条展示，不关窗
       preview.value = {
@@ -383,7 +704,20 @@ async function onConfirmResubmit(): Promise<void> {
         : { type: 'reading_decreased', field: item.field, reason },
     );
   }
-  collectedConfirms.value = list;
+  // M6（评审修复轮）：新确认与既有确认**按项合并**（同键覆盖），不得整表替换——否则
+  // 多轮确认互相覆盖，先行确认的命中项在重提时丢失，服务端 409 再次拦截（死循环）
+  const merged = [...collectedConfirms.value];
+  for (const c of list) {
+    const key = c.type === 'gas_refill' ? `gas_refill:${c.card}` : `reading_decreased:${c.field}`;
+    const idx = merged.findIndex((m) =>
+      m.type === 'gas_refill'
+        ? `gas_refill:${m.card}` === key
+        : `reading_decreased:${m.field}` === key,
+    );
+    if (idx >= 0) merged[idx] = c;
+    else merged.push(c);
+  }
+  collectedConfirms.value = merged;
   pendingConfirms.value = null;
   await onConfirmSubmit();
 }
@@ -396,6 +730,36 @@ async function onConfirmCancel(): Promise<void> {
 }
 
 onMounted(bootstrap);
+
+// F1-06「恢复网络自动上传」：系统联网事件触发排空（静默模式——自动触发不弹
+// 「仍无法连接」类反馈，避免每次返回首页都弹）。M1（评审修复轮）：跨班次滞留单在排空内
+// 被跳过，强提醒与自动排空不再互斥。门控前先重读队列：内存镜像可能与持久层滞后
+//（如页面后台期间另一 tab 排空/入队），滞留判定必须基于最新数据
+if (typeof window !== 'undefined') {
+  window.addEventListener('online', () => {
+    void (async () => {
+      await refreshQueue();
+      if (queueItems.value.length > 0) await drainQueue(true);
+    })();
+  });
+}
+
+// D-T20：待同步期间草稿仍是权威数据源（清除时点=同步成功，D-T18 修订 #9 同源）——
+// 队列项 payload 随自动保存刷新，入队后的补改不丢（提交快照始终取最新合并视图）。
+// M4（评审修复轮）：排空在途期间的补改不可能进入已上传/在传的快照，打标后由排空
+// 结束时的可见提示兑现（C-09 不静默）；补丁本身失败也必须可见（L6）
+watch(
+  () => draft.lastSavedAt.value,
+  async (ts) => {
+    if (ts === 0 || !user.value || !today.value) return;
+    const id = queueItemKey(user.value.id, today.value.duty_date);
+    if (!queueItems.value.some((i) => i.id === id)) return;
+    if (syncing.value) patchedDuringSync = true;
+    if (!(await patchQueueItem(id, { payload: buildPayload() }))) {
+      showToast('本机待同步单刷新失败（存储不可用），同步内容以最近一次成功保存为准');
+    }
+  },
+);
 </script>
 
 <template>
@@ -411,6 +775,16 @@ onMounted(bootstrap);
       <div class="mb-6 text-center">
         <div class="text-xl font-bold text-slate-800">今日交接</div>
         <div class="mt-1 text-sm text-slate-500">请使用本人账号登录（一人一号，C-05 实名制）</div>
+      </div>
+
+      <!-- L5（评审修复轮）：本机（不分账号）存在待同步单时登录页提示——共用设备的
+           换账号/掉线场景下，滞留单不再静默烂在本机（不展示内容、不代传，串值防护 C-05） -->
+      <div
+        v-if="deviceQueueCount > 0"
+        class="mx-4 mt-4 rounded-xl bg-amber-50 px-3 py-2.5 text-sm text-amber-700"
+        data-testid="device-queue-hint"
+      >
+        本机有 {{ deviceQueueCount }} 张未同步的交接单，请用原账号登录后完成同步
       </div>
 
       <van-form data-testid="login-form" @submit="onLogin">
@@ -468,8 +842,12 @@ onMounted(bootstrap);
       v-if="today"
       :today="today"
       :can-submit="user?.role === 'master'"
+      :pending-sync="queueItems.length > 0"
+      :queue-count="queueItems.length"
+      :syncing="syncing"
       @open="openCard"
       @submit="onOpenPreview"
+      @sync="drainQueue"
     />
     <div v-else class="flex min-h-screen items-center justify-center bg-slate-100">
       <van-loading v-if="loadingToday" size="24" vertical>加载今日交接…</van-loading>
@@ -504,6 +882,15 @@ onMounted(bootstrap);
         >
           关闭
         </button>
+      </div>
+
+      <!-- 离线预检模式（TK-15）：预览来自本地 shared 校验引擎，提交走向本机待同步队列 -->
+      <div
+        v-if="offlinePreviewMode"
+        class="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700"
+        data-testid="preview-offline-note"
+      >
+        当前离线：以上为本地预检结果，确认后交接单将存入本机待同步队列，回到院内网络自动上传
       </div>
 
       <!-- 接班人（F2-01/DATA-10）：按排班自动带出；修改入口待 TK-26 人员接口 -->
@@ -571,7 +958,13 @@ onMounted(bootstrap);
           data-testid="preview-submit"
           @click="onConfirmSubmit"
         >
-          {{ preview.missing_fields.length > 0 ? '仍有未填项，无法提交' : '确认提交' }}
+          {{
+            preview.missing_fields.length > 0
+              ? '仍有未填项，无法提交'
+              : offlinePreviewMode
+                ? '确认并暂存到本机'
+                : '确认提交'
+          }}
         </van-button>
       </div>
     </div>
@@ -626,6 +1019,56 @@ onMounted(bootstrap);
         >
           确认并重新提交
         </van-button>
+      </div>
+    </div>
+  </div>
+
+  <!-- F1-14 强提醒（TK-15）：交接单滞留待同步跨班次，打开即首要展示。
+       M1（评审修复轮，D-T20 修订）：跨班次滞留单不可由师傅同步（服务端只认当前班次），
+       处置动作改为「联系科长」指引；师傅确认后收起（会话内不重复弹，队列项保留、数据不丢）；
+       当班次滞留（如有）仍可在首页横幅手动同步 -->
+  <div
+    v-if="showSyncRemind"
+    class="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 px-6"
+    data-testid="sync-remind-overlay"
+  >
+    <div class="w-full max-w-sm rounded-2xl bg-white p-5">
+      <div class="text-lg font-bold text-red-600" data-testid="sync-remind-title">
+        有 {{ staleQueueItems.length }} 张交接单滞留待同步
+      </div>
+      <div class="mt-1 text-sm text-slate-600">以下交接单尚未正式提交，已滞留超过一个班次：</div>
+      <div
+        v-for="item in staleQueueItems"
+        :key="item.id"
+        class="mt-2 rounded-lg bg-red-50 px-3 py-2 text-sm text-slate-700"
+        :data-testid="`sync-remind-item-${item.duty_date}`"
+      >
+        <div>
+          班次 {{ item.duty_date }} · 入队于 {{ item.queued_at }}
+          <span class="ml-1 font-bold text-red-600">已过班次分界，需科长处理</span>
+        </div>
+        <div v-if="item.last_error" class="mt-0.5 text-xs text-red-500">
+          上次同步失败：{{ item.last_error }}
+        </div>
+      </div>
+      <div
+        v-if="hasHardFailedItems"
+        class="mt-2 text-xs text-amber-700"
+        data-testid="sync-remind-hardfailed"
+      >
+        有交接单多次同步失败，请联系科长协助核对（本机数据不会丢失）。
+      </div>
+      <van-button
+        block
+        type="danger"
+        class="mt-4"
+        data-testid="sync-remind-ack"
+        @click="syncRemindAck = true"
+      >
+        已知晓，联系科长处理
+      </van-button>
+      <div class="mt-2 text-center text-xs text-slate-400">
+        当班次交接单同步成功后方可下班（本班数据请照常提交）
       </div>
     </div>
   </div>

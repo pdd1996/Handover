@@ -43,6 +43,18 @@ export class ApiRequestError extends Error {
   }
 }
 
+/**
+ * 网络层失败（离线/服务不可达）——与业务错误（ApiRequestError）严格区分：
+ * 调用方据此前分流（离线入队 / 会话失效 / 内部异常显式暴露，评审修复轮 M5：
+ * 此前用普通 Error 表达网络失败，任意其它异常都会被误判成「网络不可用」静默吞掉）。
+ */
+export class NetworkError extends Error {
+  constructor(readonly cause?: unknown) {
+    super('网络不可用，请检查院内网络连接');
+    this.name = 'NetworkError';
+  }
+}
+
 async function http<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response;
   try {
@@ -51,9 +63,9 @@ async function http<T>(path: string, init?: RequestInit): Promise<T> {
       ...init,
       headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
     });
-  } catch {
+  } catch (cause) {
     // 网络层失败（离线/服务不可达）：不伪造成业务错误，交由上层按离线场景处理（TK-15）
-    throw new Error('网络不可用，请检查院内网络连接');
+    throw new NetworkError(cause);
   }
 
   const text = await res.text();
