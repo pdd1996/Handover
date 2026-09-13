@@ -17,7 +17,7 @@
  * ② TK-15 增待同步队列/照片暂存区 store 时必须 bump `DB_VERSION`（现无 onversionchange 处理，
  * 升版前需补 blocked 回调）。
  */
-import type { RecordFieldName } from '@handover/shared';
+import type { PrevBackfillField, RecordFieldName } from '@handover/shared';
 
 const DB_NAME = 'handover-h5';
 const DB_VERSION = 1;
@@ -25,13 +25,15 @@ const STORE = 'drafts';
 
 /**
  * 草稿值形状：字段名 → 原值（数值为字符串，与 store/draft.ts 暂存口径一致；JSON 可克隆）。
- * `usage_override_reason` 是唯一的非字段字典键（TK-13，F3-04/06）：液氧日间用量手工覆盖
- * 的原因，随草稿持久化即离线可用，提交时随 `usage_overrides[]` 上送（服务端强制校验，
- * F3-06-T2）。放本层而非另建 store：覆盖值与覆盖原因同生同灭、同随草稿 tombstone 清除。
+ * 非字段字典键两类（随草稿持久化即离线可用，提交时随 payload 上送、服务端强制校验）：
+ * - `usage_override_reason`（TK-13，F3-04/06）：液氧日间用量手工覆盖的原因；
+ * - `prev_backfill:{field}`（TK-14，F3-07/D-T19）：上一班缺失态下的补录读数，提交时
+ *   组装进 `prev_readings` 上送（服务端仅缺失态消费，有上一班记录时忽略）。
+ * 放本层而非另建 store：值与其配套原因/基线同生同灭、同随草稿 tombstone 清除。
  */
 export type DraftValues = Partial<Record<RecordFieldName, unknown>> & {
   usage_override_reason?: string;
-};
+} & Partial<Record<`prev_backfill:${PrevBackfillField}`, unknown>>;
 
 /** 草稿键（tombstone 语义的 keying 实现）：按提交人 + 班次起始日隔离 */
 export function draftKey(userId: number, dutyDate: string): string {

@@ -45,6 +45,7 @@ import {
   localMeasuredAt,
   tankRoleOf,
   toMissingField,
+  PREV_BACKFILL_FIELDS,
   waterDayUseOf,
   eDayUseOf,
   gasDayUseOf,
@@ -53,6 +54,7 @@ import {
   type FieldValueGetter,
   type FormOptionsDto,
   type MissingField,
+  type PrevBackfillField,
   type PrevDto,
   type RecordFieldName,
 } from '@handover/shared';
@@ -179,11 +181,23 @@ const prevBanner = computed<{ tone: 'warn' | 'info'; text: string } | null>(() =
     return { tone: 'warn', text: '首班记录，无上一班数据可比对' };
   }
   if (!info.prev) {
-    // F3-07：上一班数据缺失 → 显示"—"；文案只陈述现状，补录能力随 TK-12/TK-14 上线后再进文案
-    return { tone: 'info', text: '上一班数据缺失，可比对值显示为“—”' };
+    // F3-07：上一班数据缺失 → 显示“—”并允许补录（TK-14 落地，见下方补录入口）
+    return {
+      tone: 'info',
+      text: '上一班数据缺失，可比对值显示为“—”；可补录上一班读数用于用量计算（F3-07）',
+    };
   }
   return null;
 });
+
+/**
+ * F3-07 缺失态（TK-14）：今日之前有记录但相邻班次缺失（非首班、无 prev，D-T17）——
+ * 此时可比对值显“—”、师傅可补录上一班读数（见下方补录入口），服务端仅在缺失态消费
+ * 补录值（D-T19），本页用量预览同步回落补录值。
+ */
+const prevMissing = computed(
+  () => !!props.prevInfo && !props.prevInfo.first_day && !props.prevInfo.prev,
+);
 
 /** 是否显示上一班比对行：师傅亲手填/选的读数与状态（备注文本与派生列无比对意义） */
 function isComparable(name: RecordFieldName): boolean {
@@ -224,9 +238,30 @@ const SERVER_CALCULATED: ReadonlySet<RecordFieldName> = new Set<RecordFieldName>
   'lo_day_use',
 ]);
 
-/** 上一班读数 getter（用量计算直接取上一班同名字段；液氧日间用量不依赖上一班） */
-const prevGet: FieldValueGetter = (name) =>
-  (prevReadings.value?.[name] as string | number | null) ?? null;
+/**
+ * 上一班读数 getter（用量计算直接取上一班同名字段；液氧日间用量不依赖上一班）：
+ * F3-07 缺失态回落师傅补录值（草稿键 `prev_backfill:*`，与 buildPayload 的 prev_readings
+ * 组装同一数据源），使预览与提交计算同口径（服务端同样仅在缺失态消费补录，D-T19）。
+ */
+const prevGet: FieldValueGetter = (name) => {
+  const fromRecord = prevReadings.value?.[name];
+  if (fromRecord !== null && fromRecord !== undefined) return fromRecord;
+  return prevMissing.value ? draft.getValue(`prev_backfill:${name as PrevBackfillField}`) : null;
+};
+
+/** 补录入口显示条件（TK-14，F3-07）：缺失态下白名单内（shared `PREV_BACKFILL_FIELDS` 同源）的字段 */
+function isBackfillable(name: RecordFieldName): boolean {
+  return prevMissing.value && PREV_BACKFILL_FIELDS.includes(name as PrevBackfillField);
+}
+
+/** 补录值读写（草稿键 `prev_backfill:{field}`，随草稿持久化即离线可用，D-T18） */
+function backfillModelOf(name: RecordFieldName): unknown {
+  return draft.getValue(`prev_backfill:${name as PrevBackfillField}`);
+}
+
+function writeBackfill(name: RecordFieldName, v: string): void {
+  draft.setValue(`prev_backfill:${name as PrevBackfillField}`, v);
+}
 
 /** 差值的带符号展示（PRD §6.3 示例口径「如意线 +400」；负差如充气原样显负数） */
 function signed(n: number): string {
@@ -706,6 +741,21 @@ const headerTitle = computed(() =>
             :data-testid="`prev-${row.name}`"
           >
             上一班：{{ prevOf(row.name) }}
+          </div>
+
+          <!-- 补录上一班读数（TK-14，F3-07）：缺失态下上一班参与计算的字段可补录；
+               提交时组装进 prev_readings 上送，服务端仅缺失态消费并以审计留痕（D-T19） -->
+          <div v-if="isBackfillable(row.name)" class="mt-1.5">
+            <van-field
+              :model-value="String(backfillModelOf(row.name) ?? '')"
+              type="number"
+              inputmode="decimal"
+              :name="`backfill_${row.name}`"
+              placeholder="补录上一班读数（用于用量计算）"
+              class="rounded-lg bg-slate-50 px-3"
+              :data-testid="`backfill-${row.name}`"
+              @update:model-value="(v: string) => writeBackfill(row.name, v)"
+            />
           </div>
         </div>
       </div>

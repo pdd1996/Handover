@@ -20,11 +20,11 @@
  * 字符串暂存（与 decimal 列回显一致），校验引擎统一解析（validation.ts parseNumeric）。
  */
 import { reactive, ref } from 'vue';
-import type { RecordFieldName } from '@handover/shared';
+import type { PrevBackfillField, RecordFieldName } from '@handover/shared';
 import { draftKey, loadDraft, removeDraft, saveDraft, type DraftValues } from './draft-db';
 
-/** 草稿键：字段字典内列名 + 覆盖原因这一非字典键（TK-13，见 draft-db.ts DraftValues 注） */
-type DraftKey = RecordFieldName | 'usage_override_reason';
+/** 草稿键：字段字典内列名 + 非字典键（覆盖原因 TK-13、补录读数 TK-14，见 draft-db.ts 注） */
+type DraftKey = RecordFieldName | 'usage_override_reason' | `prev_backfill:${PrevBackfillField}`;
 
 const values = reactive<DraftValues>({});
 

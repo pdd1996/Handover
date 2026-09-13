@@ -16,8 +16,12 @@ import { showToast } from 'vant';
 import {
   CARD_BY_FIELD,
   isFilledValue,
+  PREV_BACKFILL_FIELDS,
+  type ConfirmItem,
+  type ConfirmationPayload,
   type FormOptionsDto,
   type MissingField,
+  type PrevBackfillField,
   type PrevDto,
   type PreviewDto,
   type SubmitPayloadDto,
@@ -229,6 +233,15 @@ const preview = ref<PreviewDto | null>(null);
 const submitting = ref(false);
 
 /**
+ * 防呆确认（TK-14，F1-12/F1-13）：submit 返 409 时服务端在 `need_confirm` 下发命中清单
+ * （契约 §4 第 2 步），弹窗逐条收集原因后组装 `confirmations` 随重提上送——原因随
+ * audit_logs.reason 留痕；不带确认直接重提仍被拒（F1-12-T2，服务端不因重试而放行）。
+ */
+const pendingConfirms = ref<ConfirmItem[] | null>(null);
+const confirmReasons = ref<Record<string, string>>({});
+const collectedConfirms = ref<ConfirmationPayload[]>([]);
+
+/**
  * 提交 payload：**全字典合并视图（评审修复轮 M5）**——「草稿 ?? 服务端值」与首页角标同一
  * 取值口径，未填字段显式上送 null。单发草稿会漏掉服务端已有值（撤回重提时本机草稿已被
  * markSubmitted 清空，payload 近乎全空），单发服务端值则清空的字段会回落旧值；两者都不是
@@ -254,7 +267,19 @@ function buildPayload(): SubmitPayloadDto {
       reason: String(draft.getValue('usage_override_reason') ?? ''),
     });
   }
-  return usage_overrides.length > 0 ? { sections, usage_overrides } : { sections };
+  // 补录上一班读数（TK-14，F3-07/D-T19）：上一班缺失态下师傅补录的相邻班次读数
+  // （SectionView 补录入口写入草稿 `prev_backfill:*`），随 payload 上送——服务端仅在
+  // 缺失态消费（有上一班记录时忽略），白名单键集 shared PREV_BACKFILL_FIELDS
+  const prev_readings: Partial<Record<PrevBackfillField, unknown>> = {};
+  for (const f of PREV_BACKFILL_FIELDS) {
+    const v = draft.getValue(`prev_backfill:${f}`);
+    if (isFilledValue(v)) prev_readings[f] = v;
+  }
+  const payload: SubmitPayloadDto = { sections };
+  if (usage_overrides.length > 0) payload.usage_overrides = usage_overrides;
+  if (Object.keys(prev_readings).length > 0) payload.prev_readings = prev_readings;
+  if (collectedConfirms.value.length > 0) payload.confirmations = collectedConfirms.value;
+  return payload;
 }
 
 async function onOpenPreview(): Promise<void> {
@@ -292,6 +317,8 @@ async function onConfirmSubmit(): Promise<void> {
     // （评审修复轮 L2：静默吞掉会让旧草稿在重开页面后压过服务端真值）
     const cleared = await draft.markSubmitted(user.value!.id, today.value.duty_date);
     showPreview.value = false;
+    collectedConfirms.value = [];
+    pendingConfirms.value = null;
     showToast(
       cleared
         ? `提交成功，交接单号 ${result.record_no}`
@@ -310,7 +337,17 @@ async function onConfirmSubmit(): Promise<void> {
       return;
     }
     if (err instanceof ApiRequestError && err.status === 409) {
-      // 当日已提交/防呆待确认：提示后回首页重取（防呆重提协议随 TK-14 落地）
+      const items = err.body.need_confirm;
+      if (items && items.length > 0) {
+        // 防呆待确认（TK-14，F1-12/F1-13）：弹窗逐条收原因后重提（契约 §4 第 2 步），
+        // 不关预览数据、不清草稿——取消后可稍后重提
+        showPreview.value = false;
+        pendingConfirms.value = items;
+        confirmReasons.value = {};
+        return;
+      }
+      // 其余 409（当日已提交等）：提示后回首页重取
+      collectedConfirms.value = [];
       showPreview.value = false;
       showToast(err.body.message);
       await loadToday();
@@ -320,6 +357,42 @@ async function onConfirmSubmit(): Promise<void> {
   } finally {
     submitting.value = false;
   }
+}
+
+/** 防呆确认项的稳定键（原因收集与重提组装按项对应；gas_refill 无 field，按卡号区分） */
+function confirmKeyOf(item: ConfirmItem): string {
+  return item.type === 'gas_refill' ? `gas_refill:${item.card}` : `reading_decreased:${item.field}`;
+}
+
+/**
+ * 确认弹窗提交（F1-12-T1）：逐项收齐原因后组装 confirmations 并重提——原因随
+ * audit_logs.reason 留痕；若服务端仍报 409（如另有命中项），确认弹窗会再次打开。
+ */
+async function onConfirmResubmit(): Promise<void> {
+  if (submitting.value) return;
+  const list: ConfirmationPayload[] = [];
+  for (const item of pendingConfirms.value ?? []) {
+    const reason = (confirmReasons.value[confirmKeyOf(item)] ?? '').trim();
+    if (reason === '') {
+      showToast('请逐条填写确认原因');
+      return;
+    }
+    list.push(
+      item.type === 'gas_refill'
+        ? { type: 'gas_refill', card: item.card, reason }
+        : { type: 'reading_decreased', field: item.field, reason },
+    );
+  }
+  collectedConfirms.value = list;
+  pendingConfirms.value = null;
+  await onConfirmSubmit();
+}
+
+/** 取消确认：清未发送的确认清单（草稿不丢），回首页刷新——稍后可重新提交 */
+async function onConfirmCancel(): Promise<void> {
+  pendingConfirms.value = null;
+  collectedConfirms.value = [];
+  await loadToday();
 }
 
 onMounted(bootstrap);
@@ -499,6 +572,59 @@ onMounted(bootstrap);
           @click="onConfirmSubmit"
         >
           {{ preview.missing_fields.length > 0 ? '仍有未填项，无法提交' : '确认提交' }}
+        </van-button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 防呆确认弹窗（TK-14，F1-12/F1-13）：409 need_confirm 逐条确认 + 原因必填，收集后重提 -->
+  <div
+    v-if="pendingConfirms && pendingConfirms.length > 0"
+    class="fixed inset-0 z-50 flex items-end justify-center bg-black/40"
+  >
+    <div class="max-h-[80vh] w-full overflow-y-auto rounded-t-2xl bg-white px-4 pb-6 pt-4">
+      <div class="flex items-baseline justify-between">
+        <div class="text-base font-bold text-slate-800" data-testid="confirm-title">
+          异常读数确认（{{ pendingConfirms.length }} 项）
+        </div>
+        <button
+          type="button"
+          class="text-sm text-slate-400"
+          data-testid="confirm-cancel"
+          @click="onConfirmCancel"
+        >
+          取消
+        </button>
+      </div>
+      <div class="mt-1 text-xs text-slate-400">确认原因将写入审计日志（技术方案 §5.5）</div>
+      <div
+        v-for="item in pendingConfirms"
+        :key="confirmKeyOf(item)"
+        class="mt-3 rounded-xl bg-amber-50 p-3"
+        :data-testid="`confirm-item-${confirmKeyOf(item)}`"
+      >
+        <div class="text-sm font-bold text-amber-700">{{ item.message }}</div>
+        <van-field
+          :model-value="confirmReasons[confirmKeyOf(item)] ?? ''"
+          type="textarea"
+          autosize
+          rows="1"
+          :maxlength="200"
+          placeholder="确认原因必填（如：上午充气 50 立方米）"
+          class="mt-2 rounded-lg bg-white px-3"
+          :data-testid="`confirm-reason-${confirmKeyOf(item)}`"
+          @update:model-value="(v: string) => (confirmReasons[confirmKeyOf(item)] = v)"
+        />
+      </div>
+      <div class="mt-4">
+        <van-button
+          block
+          type="danger"
+          :loading="submitting"
+          data-testid="confirm-resubmit"
+          @click="onConfirmResubmit"
+        >
+          确认并重新提交
         </van-button>
       </div>
     </div>
