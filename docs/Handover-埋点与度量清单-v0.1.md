@@ -29,8 +29,8 @@
 | EVT-01 | `fill_session_start` | 当日首次进入板块填写页或聚焦首个字段（每日每人一次） | `{ first_section }` | 填写耗时的起点 |
 | EVT-02 | `section_complete` | 板块点"完成"返回首页 | `{ section, elapsed_since_start }` | 定位最耗时的板块，C-01 优化依据 |
 | EVT-03 | `record_submitted` | 提交请求返回成功 | `{ client_ts, from_offline }` | 与 records.submitted_at 交叉核对 |
-| EVT-04 | `sync_queued` | 离线状态下点击提交、单据入本地队列 | `{ client_ts, queue_depth }` | F1-07 离线口径 |
-| EVT-05 | `sync_result` | 待同步队列每单上传结束 | `{ result: succeeded/failed, latency, queue_depth }` | 同步成功率分子分母 |
+| EVT-04 | `sync_queued` | 离线状态下点击提交、单据入本地队列 | `{ client_ts, queue_depth }` | F1-07 离线口径（**实现状态批注，TK-15/评审修复轮**：触发点已确定——h5 `enqueueOffline` 入队成功后，事件字段 `queue_depth` 取本机队列深度；**上报通道与发射点落地挂 TK-30**） |
+| EVT-05 | `sync_result` | 待同步队列每单上传结束 | `{ result: succeeded/failed, latency, queue_depth }` | 同步成功率分子分母（**实现状态批注，TK-15/评审修复轮**：触发点已确定——h5 排空引擎 `drainQueue` 逐单上传成功/业务拒绝/网络中断处，`latency` 可由 `queued_at` 与上传时刻差取得；**上报通道与发射点落地挂 TK-30**） |
 | EVT-06 | `draft_abandoned` | 客户端检测到**昨日**存在未提交草稿且当日未再编辑 | `{ duty_date, last_edit_ts }` | 上报仅用于度量；本地草稿保留至该班次有已提交记录（TK-08 起已按此实现，清除时点见 D-T18 修订 #9；`last_edit_ts` 随草稿体补字段，挂 TK-30） |
 
 **上报机制**：事件本地缓存、批量上报（页面心跳与网络恢复时），失败重试，不阻塞业务操作；离线期间事件的 `client_ts` 保留发生时刻（与 DATA-13 同口径）。
@@ -69,3 +69,5 @@ CREATE TABLE telemetry_events (
 
 1. **v0.1（2026-09-01）**：初稿。定义 8 项指标的可计算口径（3 项纯推导、3 项埋点、2 项 P2 推导）、6 个埋点事件（EVT-01～06）、telemetry_events 表结构建议与上报机制；明确与 audit_logs 的职责分离；列出采纳时的三处上游回写。
 2. **v0.1 增补（2026-09-11）**：TK-08（草稿层）落地后对 **EVT-06** 补实现状态批注——「本地草稿保留至该班次有已提交记录」已由客户端兑现（决策记录 D-T18 修订 #9：清除时点 = 提交成功，登出/会话失效只清内存），TK-30 落地时草稿体需补 `last_edit_ts` 字段。口径本身不变，不升版本号。
+3. **v0.1 增补（2026-09-13）**：TK-15（待同步队列）落地后对 **EVT-04/EVT-05** 补实现状态批注——两事件的业务触发点（离线入队 / 排空引擎逐单上传结束）已随 h5 `store/sync-queue.ts` 与 App.vue 排空引擎落码，事件字段可从队列项直取；上报通道（本地缓存、批量上报）仍挂 TK-30。口径本身不变，不升版本号。
+4. **v0.1 订正（2026-09-13）**：TK-15 评审修复轮对修订 3 与 EVT-04/05 批注的措辞订正——原「触发点已落码」系过度承诺（代码仅有挂账注释、无事件发射点），订正为「触发点位置已确定，上报通道与发射点落地挂 TK-30」（台账增补 #26 ⑦ 同源）。口径本身不变，不升版本号。
