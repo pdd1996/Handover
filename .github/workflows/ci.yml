@@ -45,3 +45,5 @@ jobs:
         run: pnpm --filter @handover/api db:setup
       - name: Unit and API tests
         run: pnpm test
+      - name: Check ledger consistency
+        run: pnpm check-ledger
