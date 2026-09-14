@@ -1,5 +1,6 @@
 import { Body, Controller, Get, Post, UseGuards } from '@nestjs/common';
 import type {
+  BackfillPayloadDto,
   PrevDto,
   PreviewDto,
   SubmitPayloadDto,
@@ -90,5 +91,27 @@ export class RecordsController {
     @Body() payload: SubmitPayloadDto,
   ): Promise<SubmitResultDto> {
     return this.records.submit(user, payload);
+  }
+
+  /**
+   * POST /api/v1/records/backfill —— 跨班次补交（TK-16，F3-08-T1 触发载体；决策记录 D-T21）。
+   *
+   * 上一班记录晚到（离线滞留单被 D-T20 M1 挡在排空引擎外）的合法归宿：payload 显式
+   * `duty_date`（须日历合法且严格早于当前班次日期），其余请求体与 /today/submit 同形，
+   * 校验/防呆/覆盖/补录协议同口径（submitCore 单一实现）；补交成功后同事务触发下游
+   * D+1 已提交记录的用量重算（F3-08，手工覆盖豁免），审计 record.late_submit + record.recalc。
+   *
+   * 角色：`master, chief`——提交人恒为登录人本人（师傅补交自己漏交的班次，正是滞留单
+   * 的归宿）；科长亦可补交自己的班次，代录他人挂 TK-24 处置面板（与 submit 仅 master
+   * 的口径差异即在此：补交是「晚到自救」而非当日写链路，2026-09-13 拍板）。
+   */
+  @Post('backfill')
+  @UseGuards(SessionGuard, RolesGuard)
+  @Roles('master', 'chief')
+  backfill(
+    @CurrentUser() user: SessionUser,
+    @Body() payload: BackfillPayloadDto,
+  ): Promise<SubmitResultDto> {
+    return this.records.backfill(user, payload);
   }
 }

@@ -1,5 +1,9 @@
 import bcrypt from 'bcryptjs';
-import { DEFAULT_SHIFT_START, shiftDutyDate } from '../records/duty-date';
+import {
+  DEFAULT_BACKFILL_WINDOW_DAYS,
+  DEFAULT_SHIFT_START,
+  shiftDutyDate,
+} from '../records/duty-date';
 import { createDb } from './connection';
 import {
   alerts,
@@ -109,7 +113,7 @@ async function main(): Promise<void> {
     { name: '值班室', sortNo: 110 },
   ]);
 
-  // ── 四、配置中心（全量 19 键；❓ 占位见文档第四节）─────────
+  // ── 四、配置中心（全量 20 键；❓ 占位见文档第四节）─────────
   const configRows: Array<{ key: string; value: string; remark: string }> = [
     {
       key: 'lo_threshold',
@@ -147,6 +151,12 @@ async function main(): Promise<void> {
       value: DEFAULT_SHIFT_START,
       remark:
         '❓ 班次起始时刻待科长确认；C-08 duty_date 分界：当地时刻早于此值归昨日班次（种子值对齐液氧早间时点）',
+    },
+    {
+      key: 'backfill_window_days',
+      value: String(DEFAULT_BACKFILL_WINDOW_DAYS),
+      remark:
+        '❓ 跨班次补交窗口（天）待科长确认；可补交的最早班次 = 当前班次 − N 天，超限 400（D-T21 修订）',
     },
     {
       key: 'missing_submit_deadline',
@@ -497,7 +507,7 @@ async function main(): Promise<void> {
     users: 5,
     schedules: 22,
     spots: 11,
-    configs: 19,
+    configs: 20,
     elevators: 8,
     records: 10,
     record_versions: 2,

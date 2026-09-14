@@ -21,6 +21,15 @@ export const SHIFT_TIMEZONE = process.env.SHIFT_TIMEZONE ?? 'Asia/Shanghai';
 export const DEFAULT_SHIFT_START = '08:30';
 
 /**
+ * 跨班次补交窗口天数（TK-16 评审修复轮 L3，D-T21 修订 14）：可补交的最早班次
+ * = 当前班次日期 − N 天（默认 7）。**不设下限时，任意久远日期（如 2000-01-01）都可被
+ * 凭空补交并触发下游重算**，污染 F6-06 漏交统计与历史报表。运营参数可配（F4-11 精
+ * 神），configs 键 `backfill_window_days`——种子与常量同源（防两处漂移，同 DEFAULT_SHIFT_START 先例），
+ * 值本身 ❓ 待科长确认（台账待确认清单第 10 项）。
+ */
+export const DEFAULT_BACKFILL_WINDOW_DAYS = 7;
+
+/**
  * 当地日历日减一天（按 UTC 算，避开夏令时导致的 23/25 小时日）。
  * 导出供带出取数（TK-07/D-T17：上一班 = 今日班次日期 − 1 天）与测试哨兵复用，
  * 勿在消费方另写日历推算（同班次分界口径的防漂移纪律）。
@@ -38,6 +47,17 @@ export function minusOneDay(date: string): string {
 export function plusOneDay(date: string): string {
   const t = new Date(`${date}T00:00:00Z`);
   t.setUTCHours(t.getUTCHours() + 24);
+  return t.toISOString().slice(0, 10);
+}
+
+/**
+ * 当地日历日减 N 天（days 取非负整；与 minusOneDay 同一套 UTC 算法，纯日历日无夏令时问题）。
+ * 供**补交窗口**判定（TK-16 L3）：最早可补交班次 = 当前班次日期 − windowDays。
+ * 消费方勿另写日历推算（防漂移纪律同上）。
+ */
+export function minusDays(date: string, days: number): string {
+  const t = new Date(`${date}T00:00:00Z`);
+  t.setUTCDate(t.getUTCDate() - Math.max(0, Math.trunc(days)));
   return t.toISOString().slice(0, 10);
 }
 

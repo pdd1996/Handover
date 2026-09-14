@@ -25,9 +25,12 @@ import {
   roundToScaleOf,
   toMissingField,
   unconfirmedNeedConfirmItems,
+  needConfirmItemsExcludingHits,
+  decreaseHitKey,
   validatePrevBackfillReadings,
   validateFields,
   waterDayUseOf,
+  type BackfillPayloadDto,
   type BadgeDto,
   type CardDef,
   type CardDto,
@@ -41,6 +44,7 @@ import {
   type PrevRecordDto,
   type PreviewDto,
   type RecordFieldName,
+  type RecalcResultDto,
   type SectionNo,
   type SectionStateDto,
   type SubmitPayloadDto,
@@ -54,7 +58,26 @@ import type { SessionUser } from '../auth/auth.service';
 import { ApiException } from '../common/api-error';
 import { DB, type Db } from '../db/db.module';
 import { auditLogs, configs, records, schedules, spots, users } from '../db/schema';
-import { DEFAULT_SHIFT_START, minusOneDay, plusOneDay, shiftDutyDate } from './duty-date';
+import {
+  DEFAULT_BACKFILL_WINDOW_DAYS,
+  DEFAULT_SHIFT_START,
+  minusDays,
+  minusOneDay,
+  plusOneDay,
+  shiftDutyDate,
+} from './duty-date';
+
+/** 事务执行器：submitCore 的审计/重算助手在同事务内消费（Drizzle tx 与 Db 同 select/update/insert API） */
+type DbExecutor = Db | Parameters<Parameters<Db['transaction']>[0]>[0];
+
+/**
+ * 'YYYY-MM-DD' → 日历有效性（Date 往返比对，拦 02-30、13 月等；与 isValidMeasuredAt 同一
+ * 思路，UTC 口径即可——补交日期是纯日历日，无时刻分量）。
+ */
+function calendarDateOf(s: string): string {
+  const t = new Date(`${s}T00:00:00Z`);
+  return Number.isNaN(t.getTime()) ? '' : t.toISOString().slice(0, 10);
+}
 
 /** 状态类字段取此值即为"异常"（PRD §6.2：Phase 1 无独立预警，"预警项"指表单级标红项；与 cards.ts STATUS_BAD 同口径） */
 const ABNORMAL_STATUS = 'bad';
@@ -208,6 +231,20 @@ function isAbnormal(name: RecordFieldName, value: unknown): boolean {
   return FIELD_BY_NAME[name].kind === 'status' && value === ABNORMAL_STATUS;
 }
 
+/**
+ * 用量值判等（TK-16 评审修复轮 M1）：**按数值而非字符串**比，null 与非 null 视为不同。
+ * 写库侧固化的字符串来自 `String(roundToScaleOf(field, n))`（500 → '500'），而 DECIMAL(12,1)/
+ * (8,2) 列读回为补零形态（'500.0'）——字符串相等会把数值完全相同的重算误判为变更。
+ * 无法解析为十进制的库值（理论不应存在）按「不等」处理，交由改写纠正而非静默保留。
+ */
+function sameUsageValue(a: unknown, b: unknown): boolean {
+  const num = (v: unknown): number | null =>
+    v === null || v === undefined ? null : parseNumeric(String(v));
+  // 直接 === 即可：number 与 null 比为 false（null 与非 null 视为不同）、null===null 为 true、
+  // 数值比数值（评审二轮 m1：原三元两分支一字不差，纯误导）
+  return num(a) === num(b);
+}
+
 // 班次日期纯函数（localParts/minusOneDay/parseClock/shiftDutyDate）已抽取至 ./duty-date：
 // seed.ts 与 service 必须共用同一份 C-08 分界逻辑，否则凌晨窗口种子 D0 与接口 duty_date 错位。
 
@@ -259,6 +296,21 @@ export class RecordsService {
     return { dutyDate: shiftDutyDate(now, shiftStart), shiftStart };
   }
 
+  /**
+   * 补交窗口天数（TK-16 评审修复轮 L3，D-T21 修订）：configs `backfill_window_days`，
+   * 非法/缺失回落 DEFAULT_BACKFILL_WINDOW_DAYS（7）——取值方式与 shiftStartTime 同构
+   * （运营口径后台可配，F4-11；❓ 待科长确认）。限幅 1–365 防配置错字把窗口关零。
+   */
+  async backfillWindowDays(): Promise<number> {
+    const rows = await this.db
+      .select({ value: configs.configValue })
+      .from(configs)
+      .where(eq(configs.configKey, 'backfill_window_days'))
+      .limit(1);
+    const n = Number((rows[0]?.value ?? '').trim());
+    return Number.isInteger(n) && n >= 1 && n <= 365 ? n : DEFAULT_BACKFILL_WINDOW_DAYS;
+  }
+
   /** GET /records/today 的完整响应 */
   async today(user: SessionUser, now: Date = new Date()): Promise<TodayDto> {
     const { dutyDate, shiftStart } = await this.resolveDutyDate(now);
@@ -288,7 +340,7 @@ export class RecordsService {
     const recordRow = recordRows[0]?.row;
     // 人工覆盖标识（TK-13，F3-06-T1「标识与人工值可区分」）：audit 留痕反查，不另设存储列
     const manualFields = recordRow
-      ? await this.usageOverrideFieldsOf(recordRow.recordNo, recordRow.version)
+      ? await this.usageOverrideFieldsOf(recordRow.recordNo, recordRow.version, this.db)
       : new Set<string>();
     const cards = this.buildCards(spotRows, recordRow, manualFields);
     const progress = sumBadges(cards.map((c) => c.badge));
@@ -441,8 +493,14 @@ export class RecordsService {
    * 覆盖标到已回到自动值的当前版本上（违反 F3-06-T1），且该集合是 TK-16 重算豁免（D-T07）
    * 的判定依据，误标会导致豁免不该豁免的字段。
    */
-  private async usageOverrideFieldsOf(recordNo: string, version: number): Promise<Set<string>> {
-    const rows = await this.db
+  private async usageOverrideFieldsOf(
+    recordNo: string,
+    version: number,
+    // **无默认值（评审修复轮 m5）**：默认 `this.db` 会让「在事务里忘传 executor」退化为
+    // 静默读到事务外旧快照而非编译错误；调用方显式传 this.db 或 tx
+    executor: DbExecutor,
+  ): Promise<Set<string>> {
+    const rows = await executor
       .select({ newValue: auditLogs.newValue })
       .from(auditLogs)
       .where(and(eq(auditLogs.action, 'record.usage_override'), eq(auditLogs.targetId, recordNo)));
@@ -460,8 +518,8 @@ export class RecordsService {
 
   /**
    * 用量列计算（TK-13，契约 §4 第 3 步的单一落点；TK-14 接入防呆取数）：四类口径全部
-   * 消费 shared calc.ts 同一纯函数（与 h5 实时预览同源，杜绝两端各算一套）。当前值 getter
-   * 读提交 payload 原始值（第 1 步校验已保证可解析），上一班 getter 由调用方构造——
+   * 消费 shared calc.ts 同一纯函数（与 h5 实时预览同源，杜绝两端各算一套）。当前值与
+   * 上一班 getter 均由调用方构造（提交侧读 payload、重算侧读库行，TK-16）——
    * 相邻班次记录行（adjacentPrevRow，D-T17）或缺失态下的补录值（F3-07，D-T19）。
    * 无法计算（上一班缺失/读数缺）→ 列置 null 固化，不拦提交（用量列非必填）。
    * 返回 `auto` 供覆盖协议回填审计 oldValue（覆盖前服务端算出的自动值）。
@@ -474,14 +532,13 @@ export class RecordsService {
    * 不送 MySQL（严格模式下 DECIMAL 溢出会 1264 → 500）。
    */
   private computeUsageValues(
-    sections: Readonly<Partial<Record<RecordFieldName, unknown>>>,
+    cur: FieldValueGetter,
     prev: FieldValueGetter,
     refilled: ReadonlySet<1 | 2>,
   ): {
     values: Record<string, string | null>;
     auto: Partial<Record<UsageFieldName, number>>;
   } {
-    const cur: FieldValueGetter = (name) => sections[name] ?? null;
     const water = waterDayUseOf(cur, prev);
     const e = eDayUseOf(cur, prev);
     const gas = gasDayUseOf(cur, prev, refilled);
@@ -653,6 +710,198 @@ export class RecordsService {
   }
 
   /**
+   * 下游重算（TK-16，F3-08；在 submitCore 的事务内执行）：补交 D 日后，重算紧邻下游
+   * D+1 **已提交**记录的 prev 依赖用量——技术方案 §4.3 四类口径均只依赖紧邻上一班，
+   * 故重算范围恰为 D+1（水/电/气三项；液氧日间用量只取本班两时点、不依赖上一班，
+   * 不在重算范围）。下游无行或 draft（撤回重提时提交链路本就全量重算）→ 无事可做。
+   *
+   * 豁免（D-T07）：当前版本被师傅手工覆盖的字段跳过——判定依据 = `record.usage_override`
+   * 审计行按版本过滤（TK-13 评审 M1 钉死），与 F3-06-T1 manual 旗标同源。
+   *
+   * 充气确认延续（D-P14）：重算不重跑防呆，下游原提交时确认充气的卡（`record.submit`
+   * 审计 type=gas_refill 行反查，confirmedRefillCardsOf）仍按 0 计取数；原未确认的卡
+   * 维持「负差原样固化」语义。
+   *
+   * 审计：逐**变更项**一行 `record.recalc`（oldValue 旧固化值 / newValue 新自动值与触发
+   * 语境）；值无变化不更新不写审计（防与补录值相同的补交产生噪音审计行；判等口径
+   * 见 sameUsageValue——**数值而非字符串**，M1）。三项全无变更时返回 null（L1）。
+   */
+  private async recalcDownstreamInTx(
+    tx: DbExecutor,
+    backfillDutyDate: string,
+    backfilledValues: Readonly<Record<string, unknown>>,
+    actorId: number,
+    backfillRecordNo: string,
+  ): Promise<RecalcResultDto | null> {
+    const nextRows = await tx
+      .select()
+      .from(records)
+      .where(eq(records.dutyDate, plusOneDay(backfillDutyDate)))
+      .limit(1);
+    const next = nextRows[0];
+    if (!next) return null;
+    // **状态门控（评审修复轮 L2，2026-09-14 拍板）**：只重算 submitted。
+    // draft：待重提单，提交链路本就会全量重算，此处补算多余；
+    // objection/completed：已进接班人确认流程、或已双方签名归档——**不静默改数**：
+    // §5.4 与 DEP-08 下签名件的历史版本（record_versions）与库值会背离，且接班人与科长
+    // 得知的数字悄然变化。原实现仅排除 draft，已签名单的数字可被一次补交改掉（评审发现）。
+    // 这类晚到的下游单需人工处置（异议流程 TK-20 / 科长后台），故只留日志不改数。
+    if (next.status !== 'submitted') {
+      this.logger.warn(
+        `补交 ${backfillRecordNo} 的下游 ${next.recordNo}（${next.dutyDate}）处于 ` +
+          `status=${next.status}，**不重算**（L2 拍板：不静默修改进确认/已归档单据的用量）；` +
+          `如需修正该单数字，请走异议流程或科长后台处理`,
+      );
+      return null;
+    }
+
+    const exempt = await this.usageOverrideFieldsOf(next.recordNo, next.version, tx);
+    const refilled = await this.confirmedRefillCardsOf(next.recordNo, next.version, tx);
+    const cur: FieldValueGetter = (name) => {
+      const key = recordKeyOf(name, this.logger);
+      return key ? ((next as unknown as Record<string, unknown>)[key] ?? null) : null;
+    };
+    const prev: FieldValueGetter = (name) => {
+      const key = recordKeyOf(name, this.logger);
+      return key ? (backfilledValues[key] ?? null) : null;
+    };
+    const usage = this.computeUsageValues(cur, prev, refilled);
+
+    const changed: UsageFieldName[] = [];
+    for (const field of ['water_use', 'e_use', 'gas_use'] as const) {
+      if (exempt.has(field)) continue;
+      const key = recordKeyOf(field, this.logger);
+      if (!key) continue;
+      const newV = usage.values[key] ?? null;
+      const oldV = (next as unknown as Record<string, unknown>)[key] ?? null;
+      // **数值判等（评审修复轮 M1）**：计算侧产出的字符串与 DECIMAL 列读回值形态不同
+      // （'500' vs '500.0'，roundToScaleOf 返回 number、String 不补零），字符串相等对
+      // **整数用量恒为“已变更”**——假 UPDATE + 假 record.recalc 审计，且使下方「值无变化
+      // 不写审计」的明文承诺（契约 §5 / 技术方案 §4.3 / D-T21）静默失效（探针实证）。
+      if (sameUsageValue(newV, oldV)) continue;
+      await tx
+        .update(records)
+        .set({ [key]: newV })
+        .where(eq(records.id, next.id));
+      await tx.insert(auditLogs).values({
+        actorId,
+        action: 'record.recalc',
+        targetType: 'record',
+        targetId: next.recordNo,
+        oldValue: { field, value: oldV, duty_date: next.dutyDate },
+        newValue: {
+          field,
+          value: newV,
+          version: next.version,
+          trigger: 'late_backfill',
+          backfill_record_no: backfillRecordNo,
+        },
+        reason: '上一班记录晚到补交，自动重算',
+      });
+      changed.push(field);
+    }
+    // **待复核清单（评审修复轮 L6，2026-09-14 拍板）**：重算不重跑防呆拦截（不得在无人
+    // 值守的回写链路上 409 卡住），但新基线可能使下游出现 D-T19 命中项（如补交的 D 日读数
+    // 高于 D+1 自己 → 本应强制确认的回退却以负差直接入库，旁路 F1-12）。**不改数、不拦提交**，
+    // 而是随响应与审计 `record.recalc_review` 一并标出，交人工走异议流程核对。
+    // 确认复用口径（评审二轮 L1）：充气按卡号复用（D-P14 事实语义，confirmedRefillCardsOf），
+    // 回退按「field+prev+current 三元组」值匹配复用（confirmedDecreaseHitsOf）——字段级复用
+    // 会让新基线下更大的回退被旧确认静默解锁（D-T20 M6 同族陷阱），同值命中（如补录值恰与
+    // 晚到实值一致）才消音。
+    const needsReview = needConfirmItemsExcludingHits(
+      cur,
+      prev,
+      await this.confirmedDecreaseHitsOf(next.recordNo, next.version, tx),
+      refilled,
+    );
+    if (needsReview.length > 0) {
+      await tx.insert(auditLogs).values({
+        actorId,
+        action: 'record.recalc_review',
+        targetType: 'record',
+        targetId: next.recordNo,
+        newValue: {
+          items: needsReview,
+          version: next.version,
+          trigger: 'late_backfill',
+          backfill_record_no: backfillRecordNo,
+        },
+        reason: '重算新基线命中防呆判定，未自动确认——请走异议流程人工核对',
+      });
+    }
+    // 无实际变更且无待复核项 → 不产生空壳重算结果（契约 SubmitResultDto.recalc「值无变化时
+    // 为 null」，评审修复轮 L1：原实现返回 {fields: []} 与注释不符）
+    if (changed.length === 0 && needsReview.length === 0) return null;
+    return { record_no: next.recordNo, fields: changed, needs_review: needsReview };
+  }
+
+  /**
+   * 指定记录原提交时**已确认回退**的命中键集合（TK-16 评审二轮 L1）：从 `record.submit`
+   * 审计 type=reading_decreased 行按当前版本反查，键 = shared `decreaseHitKey`（field:prev:
+   * current 三元组）。重算链路仅消音**完全相同**的命中；基线变化的新命中照常标 needs_review
+   * （字段级复用会让新基线下更大的回退被旧确认静默解锁，D-T20 M6 同族陷阱）。
+   */
+  private async confirmedDecreaseHitsOf(
+    recordNo: string,
+    version: number,
+    executor: DbExecutor,
+  ): Promise<ReadonlySet<string>> {
+    const rows = await executor
+      .select({ newValue: auditLogs.newValue })
+      .from(auditLogs)
+      .where(and(eq(auditLogs.action, 'record.submit'), eq(auditLogs.targetId, recordNo)));
+    const hits = new Set<string>();
+    for (const r of rows) {
+      const nv = r.newValue;
+      if (nv && typeof nv === 'object' && 'type' in nv && 'version' in nv) {
+        if (
+          (nv as { type: unknown }).type === 'reading_decreased' &&
+          Number((nv as { version: unknown }).version) === version
+        ) {
+          const nv2 = nv as unknown as { field: unknown; prev: unknown; current: unknown };
+          const field = String(nv2.field);
+          const prev = Number(nv2.prev);
+          const current = Number(nv2.current);
+          if (Number.isFinite(prev) && Number.isFinite(current)) {
+            hits.add(decreaseHitKey(field as DecreasedGuardField, prev, current));
+          }
+        }
+      }
+    }
+    return hits;
+  }
+
+  /**
+   * 指定记录原提交时确认充气的卡集合（TK-16 重算的取数层延续，D-P14）：从 `record.submit`
+   * 审计行的 type=gas_refill（confirmAudits 写入形态）按当前版本反查，供 gasDayUseOf 的
+   * refilled 参数复用原提交的确认语义。
+   */
+  private async confirmedRefillCardsOf(
+    recordNo: string,
+    version: number,
+    executor: DbExecutor, // 同上：无默认值，防事务内漏传退化静默旧读
+  ): Promise<ReadonlySet<1 | 2>> {
+    const rows = await executor
+      .select({ newValue: auditLogs.newValue })
+      .from(auditLogs)
+      .where(and(eq(auditLogs.action, 'record.submit'), eq(auditLogs.targetId, recordNo)));
+    const cards = new Set<1 | 2>();
+    for (const r of rows) {
+      const nv = r.newValue;
+      if (nv && typeof nv === 'object' && 'type' in nv && 'version' in nv) {
+        if (
+          (nv as { type: unknown }).type === 'gas_refill' &&
+          Number((nv as { version: unknown }).version) === version
+        ) {
+          const card = Number((nv as unknown as { card: unknown }).card);
+          if (card === 1 || card === 2) cards.add(card);
+        }
+      }
+    }
+    return cards;
+  }
+
+  /**
    * payload.sections → records 列值（TS 键）。职责边界：
    * - 字典外键忽略；派生列（lo_night_use 等非存储列）经 recordKeyOf 判定后不落库；
    * - 数值：parseNumeric（十进制字面量）复验后，decimal 列存字符串保精度、INT 列转 number；
@@ -767,9 +1016,57 @@ export class RecordsService {
    * 上一班取数 = 相邻班次记录行或缺失态补录值，充气确认后的卡按 0 计 D-P14）；
    * ④ 标红确认行（alerts）随 TK-17/TK-22 落地；⑤ 转 submitted、submitted_at=服务端收到时刻、
    * 生成 record_no；⑥ 写审计（record.submit + record.usage_override + 接班人修改原因留痕）。
+   *
+   * TK-16 起：提交主体抽为 submitCore（跨班次补交 backfill 同口径复用，dutyDate 由调用方
+   * 决定，防两套提交口径漂移）。
    */
   async submit(user: SessionUser, payload: SubmitPayloadDto): Promise<SubmitResultDto> {
     const { dutyDate } = await this.resolveDutyDate();
+    return this.submitCore(user, payload, dutyDate, { late: false });
+  }
+
+  /**
+   * POST /records/backfill（TK-16，F3-08-T1 触发载体；决策记录 **D-T21**，2026-09-13 拍板）：
+   * 上一班记录晚到（离线滞留单，被 D-T20 M1 挡在排空引擎外）的合法入库路径。
+   * - duty_date 显式上送：日历合法且**严格早于当前班次日期**（当日/未来班次走 /today/submit）；
+   * - 提交人恒为登录人本人（不代录他人；科长代录他人挂 TK-24，F6-05 安全阀随 TK-26）；
+   * - 校验/防呆/覆盖/补录协议与 /today/submit 完全同口径（submitCore 单一实现）；
+   * - 该班次已有任何记录（含 draft）→ 409 RECORD_EXISTS；
+   * - 补交成功后**同事务**触发下游重算（F3-08：仅紧邻 D+1 已提交记录、手工覆盖豁免，
+   *   见 recalcDownstreamInTx），响应带 recalc 结果，审计 record.late_submit + record.recalc。
+   */
+  async backfill(user: SessionUser, payload: BackfillPayloadDto): Promise<SubmitResultDto> {
+    const { dutyDate: currentShift } = await this.resolveDutyDate();
+    const raw = typeof payload?.duty_date === 'string' ? payload.duty_date.trim() : '';
+    // 单次读取（评审二轮 m2）：原实现校验与错误文案各调一次，两次读取之间配置被修改
+    // 会出现「按 7 天被拒、文案却说 30 天」的竞态
+    const windowDays = await this.backfillWindowDays();
+    const earliest = minusDays(currentShift, windowDays);
+    if (
+      !/^\d{4}-\d{2}-\d{2}$/.test(raw) ||
+      calendarDateOf(raw) !== raw ||
+      raw >= currentShift ||
+      raw < earliest // L3：无下限时可凭空补交 2000-01-01 并触发下游重算，污染 F6-06 与报表
+    ) {
+      throw new ApiException(
+        'VALIDATION_OUT_OF_RANGE',
+        `补交班次日期非法（仅限早于当前班次且在 ${windowDays} 天窗口内的历史班次）`,
+        { missingFields: [toMissingField('duty_date')] },
+      );
+    }
+    return this.submitCore(user, payload, raw, { late: true });
+  }
+
+  /**
+   * 提交主体（在线提交与跨班次补交的单一实现，TK-16 抽取）：dutyDate 由调用方决定——
+   * 在线提交恒为当前班次（C-08），补交为显式上送且早于当前班次的历史班次（D-T21）。
+   */
+  private async submitCore(
+    user: SessionUser,
+    payload: SubmitPayloadDto,
+    dutyDate: string,
+    opts: { late: boolean },
+  ): Promise<SubmitResultDto> {
     const sections = (payload?.sections ?? {}) as Readonly<
       Partial<Record<RecordFieldName, unknown>>
     >;
@@ -839,13 +1136,26 @@ export class RecordsService {
 
     // 当日唯一（F1-01）：已存在非 draft 行 → 409 RECORD_EXISTS；draft（撤回重提）→ 更新 + version+1
     const existingRows = await this.db
-      .select({ id: records.id, version: records.version, status: records.status })
+      .select({
+        id: records.id,
+        version: records.version,
+        status: records.status,
+        submitterId: records.submitterId,
+      })
       .from(records)
       .where(eq(records.dutyDate, dutyDate))
       .limit(1);
     const existing = existingRows[0];
+    // 当日唯一（F1-01）：**两条链路均**只对非 draft 行 409；draft 行走下方「更新 + version+1」
+    // 分支。补交接管 draft 行（评审修复轮 L5，2026-09-14 拍板）：原补交对任何已存在行一律 409，
+    // 与「submit 只认当前班次」合起来构成死角——D 日提交 → 撤回（TK-21 产生 draft）→ 师傅离院
+    // 未重提 → 之后再无任何路径能让 D 日入库（补交 409、submit 只能建 D+1），该日永停在 draft、
+    // 用量永不固化、F6-06 误报漏交。晚到入库与撤回重提在此同一出口，语义不冲突（D-T21 修订）。
     if (existing && existing.status !== 'draft') {
-      throw new ApiException('RECORD_EXISTS', '当日记录已提交，不可重复提交');
+      throw new ApiException(
+        'RECORD_EXISTS',
+        opts.late ? '该班次记录已存在，不可重复补交' : '当日记录已提交，不可重复提交',
+      );
     }
 
     // 第 ② 步（TK-14，契约 §4 防呆判定）：上一班取数与 GET /prev 同源（adjacentPrevRow，D-T17）；
@@ -928,7 +1238,7 @@ export class RecordsService {
     const refilled = new Set<1 | 2>(
       [...confirmedRefill.keys()].filter((card) => refills.some((r) => r.card === card)),
     );
-    const usage = this.computeUsageValues(sections, prevGet, refilled);
+    const usage = this.computeUsageValues(cur, prevGet, refilled);
     const overrides = this.applyUsageOverrides(overrideCheck.valid, usage.auto);
     Object.assign(usage.values, overrides.values);
 
@@ -939,7 +1249,8 @@ export class RecordsService {
     const submittedAt = localMeasuredAt(); // DATA-09：服务端收到时刻（离线场景下即同步成功时刻）
     const version = existing ? existing.version + 1 : 1;
 
-    // 第 ⑤⑥ 步同事务：记录行（新建或撤回重提更新）+ 审计
+    // 第 ⑤⑥ 步同事务：记录行（新建或撤回重提更新）+ 审计（补交再加晚到留痕与下游重算）
+    let recalc: SubmitResultDto['recalc'] = null;
     const saved = await this.db.transaction(async (tx) => {
       let recordId: number;
       if (existing) {
@@ -1031,6 +1342,26 @@ export class RecordsService {
           newValue: { readings: backfill, version },
         });
       }
+
+      // 晚到补交留痕与下游重算（TK-16/F3-08，D-T21）：补交本体即 record.submit（上方），
+      // 本行补记晚到语境；F6-06 漏交检测以 records 行存在为准，该日自此不再计漏交。
+      // 重算在同事务内执行——补交行与下游重算同生共死，防「补交成功、重算失败」半态
+      if (opts.late) {
+        await tx.insert(auditLogs).values({
+          actorId: user.id,
+          action: 'record.late_submit',
+          targetType: 'record',
+          targetId: recordNo,
+          newValue: {
+            duty_date: dutyDate,
+            version,
+            // draft 接管（L5）：显式记接管前的提交人，归属变更 A→B 不靠两条审计的 actor 间接推断
+            ...(existing ? { prev_submitter_id: existing.submitterId } : {}),
+          },
+          reason: '上一班记录晚到，跨班次补交',
+        });
+        recalc = await this.recalcDownstreamInTx(tx, dutyDate, values, user.id, recordNo);
+      }
       return recordId;
     });
 
@@ -1045,6 +1376,8 @@ export class RecordsService {
           ? { id: receiverId, real_name: receiverName ?? String(receiverId) }
           : null,
       receiver_changed: receiverChanged,
+      // 仅补交响应携带重算结果（在线提交无重算语义，缺省不传，契约 SubmitResultDto.recalc）
+      ...(opts.late ? { recalc } : {}),
     };
   }
 
