@@ -16,7 +16,7 @@ import type { UsageFieldName } from './calc';
 import type { RecordFieldName } from './fields';
 import type { SectionNo } from './sections';
 import type { PrevBackfillField } from './guard';
-import type { ConfirmationPayload, DutyGuardConfirm, MissingField } from './errors';
+import type { ConfirmationPayload, DutyGuardConfirm, MissingField, ConfirmItem } from './errors';
 
 // ── 契约 §3.2 GET /records/today（今日交接首页；F1-01、F1-02、F1-03）─────────
 
@@ -240,6 +240,41 @@ export interface PreviewDto {
   abnormal_fields: readonly MissingField[];
 }
 
+/**
+ * POST /records/backfill 请求体（TK-16/D-T21，F3-08「上一班记录晚到→重算下游」的触发载体）。
+ *
+ * 除 `duty_date` 外与 /today/submit 请求体完全同形：校验/防呆/覆盖/补录协议同一套
+ * （服务端把补交当作「指定班次的提交」处理，复用 submitCore 单一实现，防两套口径漂移）。
+ */
+export interface BackfillPayloadDto extends SubmitPayloadDto {
+  /**
+   * 补交班次的班次起始日（C-08 形态 `YYYY-MM-DD`）。服务端约束：
+   * ① 日历合法；② **严格早于当前班次日期**（当日/未来班次走 /today/submit，D-T20 M1）；
+   * ③ **不早于补交窗口**（当前班次 − configs `backfill_window_days` 天，默认 7，评审修复轮 L3）；
+   * ④ 该班次已有**非 draft** 记录 → 409 RECORD_EXISTS（draft 行由补交接管为重提，L5）。
+   * 提交人恒为登录人本人（不代录他人；科长代录他人挂 TK-24 处置面板）。
+   */
+  duty_date: string;
+}
+
+/**
+ * 补交后的下游重算结果（TK-16，F3-08；仅 `POST /records/backfill` 响应携带）。
+ */
+export interface RecalcResultDto {
+  /** 被重算的下游单（紧邻 D+1）的 record_no */
+  record_no: string;
+  /** 实际变更的用量字段（重算三项的子集；豁免项与数值无变化项不入列） */
+  fields: readonly UsageFieldName[];
+  /**
+   * **待人工复核清单**（TK-16 评审修复轮 L6，2026-09-14 拍板）：重算**不重跑防呆拦截**
+   * （F3-08 只要求重算与审计，不得在无人值守的回写链路上 409 卡住），但新基线使下游出现
+   * D-T19 命中项（读数回退；未被原提交确认的充气）时，**不改数、不拦提交**，在此与审计
+   * `record.recalc_review` 一并标出，交人工走异议流程（TK-20）核对。
+   * 空数组 = 无命中（原提交已确认充气的卡不重复计入）。
+   */
+  needs_review: readonly ConfirmItem[];
+}
+
 /** POST /records/today/submit 响应体（F2-01：生成正式交接单） */
 export interface SubmitResultDto {
   id: number;
@@ -254,6 +289,15 @@ export interface SubmitResultDto {
   receiver: { id: number; real_name: string } | null;
   /** 本次提交是否修改了接班人（true 时 receiver_change_reason 已留痕，DATA-10） */
   receiver_changed: boolean;
+  /**
+   * 下游重算结果（TK-16，F3-08；**仅补交触发**，在线提交恒缺省/undefined）：
+   * 补交 D 日后，重算紧邻下游 D+1 **已提交（status='submitted'）**记录的 prev 依赖用量
+   * （water_use/e_use/gas_use）。返回 null 的四种情形：下游无记录；为 draft（待重提，
+   * 提交链路自会全量重算）；**处于 objection/completed（已进确认流程或已签名归档，
+   * 不静默改数——评审修复轮 L2，2026-09-14 拍板）**；或**无实际变更且无待复核项**（L1）。
+   * 逐变更项审计 `record.recalc`（契约 §5），手工覆盖项豁免（D-T07）。
+   */
+  recalc?: RecalcResultDto | null;
 }
 
 // ── 契约 §3.2 GET /records/today/prev（上一班读数带出；F1-05、F1-15、DATA-02、F3-07；TK-07）─────────

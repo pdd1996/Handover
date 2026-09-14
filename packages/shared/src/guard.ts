@@ -98,9 +98,54 @@ export function unconfirmedNeedConfirmItems(
   confirmedDecreased: ReadonlySet<DecreasedGuardField> = new Set(),
   confirmedRefills: ReadonlySet<1 | 2> = new Set(),
 ): ConfirmItem[] {
+  return needConfirmItemsOf(
+    cur,
+    prev,
+    (d) => !confirmedDecreased.has(d.field),
+    (r) => !confirmedRefills.has(r.card),
+  );
+}
+
+/**
+ * 回退命中的**复用键**（TK-16 评审二轮 L1）：`field:prev:current` 三元组。
+ * 重算（records.service recalcDownstreamInTx）会改变上一班基线，若按字段名复用旧确认，
+ * 「新基线下更大/更小的回退」会被旧确认静默解锁（D-T20 M6「确认不跨提交复用」的同族
+ * 陷阱）；仅当重算命中与原提交确认**完全相同**（三元组一致）才视为已确认。
+ */
+export function decreaseHitKey(field: DecreasedGuardField, prev: number, current: number): string {
+  return `${field}:${prev}:${current}`;
+}
+
+/**
+ * need_confirm 清单的**值匹配复用**变体（TK-16 评审二轮）：供重算链路消费——下游单原提交
+ * 已确认过的回退（record.submit 审计 type=reading_decreased 行）只在重算命中与其**完全相同**
+ * 时消音；基线变化产生的新命中一律重新标出。充气卡仍按卡号复用（D-P14 事实语义：
+ * 「该卡确实充过气」不随基线变化，已确认卡按 0 计取数）。
+ */
+export function needConfirmItemsExcludingHits(
+  cur: FieldValueGetter,
+  prev: FieldValueGetter,
+  confirmedDecreaseHits: ReadonlySet<string> = new Set(),
+  confirmedRefills: ReadonlySet<1 | 2> = new Set(),
+): ConfirmItem[] {
+  return needConfirmItemsOf(
+    cur,
+    prev,
+    (d) => !confirmedDecreaseHits.has(decreaseHitKey(d.field, d.prev, d.current)),
+    (r) => !confirmedRefills.has(r.card),
+  );
+}
+
+/** 两变体共用的清单组装（判定范围与文案单一来源，勿在消费方另写映射） */
+function needConfirmItemsOf(
+  cur: FieldValueGetter,
+  prev: FieldValueGetter,
+  keepDecreased: (d: DecreasedItem) => boolean,
+  keepRefill: (r: RefillItem) => boolean,
+): ConfirmItem[] {
   return [
     ...decreasedReadingsOf(cur, prev)
-      .filter((d) => !confirmedDecreased.has(d.field))
+      .filter(keepDecreased)
       .map((d): ConfirmItem => ({
         type: 'reading_decreased',
         field: d.field,
@@ -109,7 +154,7 @@ export function unconfirmedNeedConfirmItems(
         message: `本次读数 ${d.current} 小于上一班 ${d.prev}，请确认是否属实（换表底数/错抄须说明）`,
       })),
     ...refillCardsOf(cur, prev)
-      .filter((r) => !confirmedRefills.has(r.card))
+      .filter(keepRefill)
       .map((r): ConfirmItem => ({
         type: 'gas_refill',
         card: r.card,
