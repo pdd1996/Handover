@@ -14,7 +14,7 @@
  *
  * **需真实 MySQL 与种子数据**：本地先 `pnpm --filter @handover/api db:setup`；
  * CI 由 workflow 的 mysql service 提供。测试对库的改动在 afterAll 全部还原，
- * 不破坏《开发种子数据》的计数口径（records=10、configs=19）。
+ * 不破坏《开发种子数据》的计数口径（records=10、configs=20）。
  *
  * **必须串行跑**（api 的 test 脚本为 `jest --runInBand` + `maxWorkers: 1`）：
  * 与其余 spec 共用同一真实 MySQL，纪律同 records.spec.ts 头部说明。
