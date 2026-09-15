@@ -91,8 +91,8 @@
 
 | 方法与路径 | 角色 | 用途 | 关联规格 | 契约要点 |
 | --- | --- | --- | --- | --- |
-| GET `/elevators/expected` | master | 当前时刻逐台预期状态 | ELE-03 | 服务端按**当前时刻**计算并生成 elevator_checks 明细行（check_time 锁定，ELE-05） |
-| POST `/records/today/elevator-checks` | master | 提交逐台核对结果 | ELE-04、ELE-06、ELE-07 | `actual`（match/run/stop/fault）+ 不一致必填 `explanation`（缺则 409）；不一致生成标红确认行 |
+| GET `/elevators/expected` | master, chief | 当前时刻逐台预期状态 | ELE-03 | **只读计算不落库（D-T22）**：按当前时刻逐台返回 expected 与计划回显（check_time 为响应级核对时刻基准）；角色列放宽 chief 同 today/prev 口径 |
+| —（原 POST `/records/today/elevator-checks` 已订正为并入 §4 提交协议，见下方电梯核对口径与订正 20） | master | 随提交 payload `elevator_checks[]` 上送核对结果 | ELE-04、ELE-05、ELE-06、ELE-07 | `actual`（match/run/stop/fault）+ 不一致必填 `explanation`（缺则 409 ELEVATOR_EXPLANATION_REQUIRED，逐台 `elevator:{id}` 点名）；服务端按上送 check_time 重算 expected 落库（ELE-05）；不一致写 alerts 标红行（ELE-06，level=mid） |
 
 ### 3.4 交接确认（接班人）
 
@@ -149,6 +149,9 @@
   "duty_guard_confirm": { "confirmed": true, "reason": "替班" },
   "usage_overrides": [
     { "field": "lo_day_use", "value": "0.50", "reason": "日间补液，按实际修正" }
+  ],
+  "elevator_checks": [
+    { "elevator_id": 3, "check_time": "2026-08-27 21:05:00", "expected": "stop", "actual": "match", "explanation": null }
   ]
 }
 ```
@@ -161,6 +164,8 @@
 4. 生成标红确认行（状态异常/电梯不一致/交接事项拆条）写入 alerts（DEP-08）
 5. 记录转 submitted，`submitted_at` = 服务端收到时刻（DATA-09：离线场景下即同步成功时刻）；生成 record_no
 6. 写审计（含覆盖/确认原因）
+
+电梯核对口径（TK-17，**D-T22**）：核对结果随请求体 `elevator_checks[]` 上送（逐台 `{elevator_id, check_time, expected, actual, explanation}`），服务端在第 1 步以 shared `validateElevatorChecks` 同口径预检（电梯不存在/重复上送/时刻非法/actual 越枚举/说明超 300 → 400 逐条以 `elevator:{id}` 点名），在**第 2 步之后**对「不一致而说明空白」整体 409 ELEVATOR_EXPLANATION_REQUIRED（**该 409 必带 `missing_fields[]`，客户端须与 400 同处理逐条点名 + 点击跳转，不得只提示聚合文案**——订正 21）；落库时服务端按上送 `check_time`（核对时刻）**重算 expected**（「预期状态以核对时刻锁定、提交时不重算」ELE-05/D-P16 的实现口径 = 预期恒按核对时刻计算，客户端 expected 仅为展示留痕）。`check_time` 由**客户端在师傅落笔（点选核对结果）的瞬间**以本机时钟生成（D-T22 修订⑤，与 `lo_measured_am/pm` 的 DATA-13 同口径：核对事实发生在本机、本机时间戳即唯一权威），**不得沿用打开板块时拉取到的快照时刻**（陈旧时刻会让预期算错并抑制标红）；客户端上送的 expected 亦按该落笔时刻计算，服务端仍复算为准，与记录行同事务写入 elevator_checks（重提先清后插快照语义）；归一后任一不一致（actual≠match，含 fault）追加 alerts 标红行（第 4 步，rule_key=elevator_mismatch、level=mid）。核对不强制：未上送或空数组 = 本班次未核对，无明细行也无标红。审计无新增 action——elevator_checks 明细行即留痕（explanation 随行），与标红行（alerts）共同承载 ELE-04/ELE-06 的追溯面。
 
 补充口径（TK-09，DATA-13/D-P12）：`lo_measured_am` / `lo_measured_pm` 由**客户端填写液氧读数时自动记录**（本机时刻，随 IndexedDB 草稿持久化即离线本地时间戳），随 payload 上送、服务端**原样落库**——不得以同步/接收时刻覆盖（DATA-13-T2 判据）。与第 3 步的用量列（服务端计算、不信任客户端传值）不同源：测量时刻的事实发生在本机，本机时间戳即唯一权威来源。
 
@@ -210,3 +215,5 @@
 17. **v0.1 订正（2026-09-13）**：TK-16（下游重算与豁免）落地联动，决策记录 **D-T21** 拍板（闭环订正 12/15 阶段挂账的补交端点悬案，D-T20 修订 12 的待拍板项就此定案）——① **§3.2 新增路由 POST `/records/backfill`**（master,chief；跨班次补交：payload 显式 duty_date 严格早于当前班次、提交人恒为登录人本人、该班次已有任何记录 409 RECORD_EXISTS、其余请求体与 submit 同形且校验/防呆/覆盖/补录协议同口径 submitCore 单一实现），**Phase 1 路由 33 → 34 条**；错误码表 13 项不变（复用 VALIDATION_OUT_OF_RANGE / RECORD_EXISTS / READINGS_DECREASED / GAS_REFILL_CONFIRMED）。② **§4 补交口径**：复用六步协议，差异=显式 duty_date + 补交语境 409 + 第 5 步后同事务下游重算。③ **§5 审计表新增两行**：`record.late_submit`（补交本体）与 `record.recalc`（逐变更项，手工覆盖豁免 D-T07，判定依据=当前版本 record.usage_override 行，订正 14 ② 同源）。④ 响应形状权威定义 shared dto `BackfillPayloadDto` / `SubmitResultDto.recalc`（在线提交响应无 recalc 键）。
 18. **v0.1 订正（2026-09-14）**：TK-16 **独立评审修复轮**（评审报告 M1 + L1–L9 + m1–m5；M1 与「值无变化」相关项已修，四项语义由用户拍板）——① **M1 数值判等**：重算的「值是否变化」原按字符串比较，而计算侧产出 `String(roundToScaleOf(..))`（整数→'500'）与 DECIMAL(12,1) 列读回的 '500.0' **恒不相等**→ 整数用量总被误判为变更，产生假 UPDATE + 假 `record.recalc` 审计（探针实证；水/电/气读数多为整数，即绝大多数真实场景），现改按数值判等（null 与非 null 视为不同），§5 `record.recalc` 行同步写明判等口径。② **L1**：三项全无变更时 `recalc` 返回 **null**（原返回 `{fields: []}` 与本表/DTO 注释不符）。③ **L2 状态门控（拍板）**：只重算 `status='submitted'` 的下游单——原实现仅排除 draft，**`objection`/`completed`（已进确认流程或已双方签名归档）可被一次补交静默改掉数字**，与 §5.4/DEP-08 的签名件语义相逆；现跳过并留日志（人工处置走异议流程/科长后台）。④ **L3 补交窗口（拍板）**：`duty_date` 新增下限 = 当前班次 − configs **`backfill_window_days`**（种子 7，❓ 待科长确认，台账待确认清单第 10 项），越界 400 点名 `duty_date`——原无下限，任意久远日期（如 2000-01-01）可被凭空补交并触发重算，污染 F6-06 漏交统计与历史报表。⑤ **L5 draft 接管（拍板）**：补交由「任何已存在行一律 409」改为**仅非 draft 行 409**，draft 行走更新+version+1 分支——原口径与「submit 只认当前班次」合起来使「提交→撤回→离院未重提」的班次永久无法入库。⑥ **L6 待复核清单（拍板）**：新增 `recalc.needs_review`（shared dto `RecalcResultDto`，`fields` 同时收窄为 `readonly UsageFieldName[]`）与§5 新行 **`record.recalc_review`**：重算不重跑防呆拦截，但新基线命中 D-T19 判定时（如补交的 D 日读数高于 D+1 自己→本应强制确认的回退以负差入库）**不改数不拦提交而是标出待人工核对**，堵住 F1-12 在回写链路上的旁路。⑦ **m1 错字订正**：§4 补交口径原文「当日/未来班次走**本路由**」应为走 `/records/today/submit`（契约是验收权威，反向阅读会直接导致误改）。⑧ **挂账显式化**（本轮不实现，防静默缺口）：**无 `/records/backfill/preview`**——现有 preview 的接班人基线取当前班次，补交带 `receiver_id` 时「预览就绪/提交 400」的不对称仍存在（订正 12/14 的「预检即点名」纪律），**随 h5 补交入口（TK-24）一并落地**；chief 在补交写链路的例外授权即 D-T21 拍板（与 §3.2 submit 行「提交链路 master，不适用 chief 只读回写口径」不冲突：该纪律限**当日**提交链路，补交是「晚到自救」的独立写链路）；**补交班次的排班归属校验**（防师傅冒名补交他人班次记在自己名下）随 F6-05 安全阀同一出口，**挂 TK-26**；重算对下游行的快照读写无行锁（丢更新窗口）与并发撞 `duty_date` UNIQUE 的 1062→409 归一，**随 TK-20 复用同一重算方前必须补**。错误码表 13 项与路由总数（34）不变。
 19. **v0.1 订正（2026-09-14）**：TK-16 修复轮**红队对抗评审**（无 M 级，任务分解修订 32）——§5 `record.recalc_review` 行补**确认复用口径**：重算的待复核清单对下游原提交已确认的命中不重复标出，但两类确认复用规则不同——**回退按值匹配**（field+prev+current 三元组一致才消音；重算会改变上一班基线，字段级复用会让新基线下更大的回退被旧确认静默解锁，D-T20 M6 同族陷阱）、**充气按卡号复用**（D-P14 事实语义：已确认卡按 0 计取数，不随基线变化）。响应形状不变（`RecalcResultDto`）；权威形状 shared guard `needConfirmItemsExcludingHits` / `decreaseHitKey`（与既有 `unconfirmedNeedConfirmItems` 共用同一清单组装，提交链路行为不变）。错误码表 13 项与路由总数（34）不变。
+20. **v0.1 订正（2026-09-14）**：TK-17（电梯核对·表单端）落地联动，**D-T22 拍板**——§3.3 两行改写：① GET `/elevators/expected` 改**只读计算不落库**（原「生成 elevator_checks 明细行」的写副作用与 D-T18「records 行提交时一次性创建」冲突，elevator_checks.record_id NOT NULL 提交前无行可挂），角色列放宽 chief（与 today/prev 同口径）；② POST `/records/today/elevator-checks` **并入 §4 提交协议**（请求体 `elevator_checks[]`，独立端点行标注作废不再实现）。§4 补「电梯核对口径」段：第 1 步预检 + 第 2 步后 409 ELEVATOR_EXPLANATION_REQUIRED + 落库按 check_time 重算 expected（ELE-05 口径）+ 不一致写 alerts（level=mid）；§5 无新增审计行（elevator_checks 明细 + alerts 标红即留痕）。§3.3 表 POST 行的「关联规格」补 ELE-05（check_time 锁定随本载体落库）。原文按「修订记录只追加不删除」保留于修订记录外正文（表格行已原位改写，语义以本条为准）。联动：决策记录 D-T22、台账增补 #30、技术方案修订 25、任务分解修订 33。
+21. **v0.1 订正（2026-09-15）**：TK-17 **独立评审修复轮**（探针实证 M1/M2 + L1/L2/L3/L4 全处置）——① **§4 电梯核对口径补 `check_time` 来源**：由客户端在师傅落笔瞬间以本机时钟生成（D-T22 修订⑤，DATA-13 同口径），禁止沿用拉取到的快照时刻；离线/页面挂机下这会把几小时前的拉取时刻记成核对时刻，使服务端按该时刻重算的预期算错并抑制「该停没停」标红（ELE-03/05/06 同时受损）。② **409 ELEVATOR_EXPLANATION_REQUIRED 明确必带 `missing_fields[]` 且客户端须与 400 同处理**（逐条点名 + 点击跳转、不清已收集的防呆确认）——原实现把该 409 当「其余 409」只留 toast，C-09 在电梯场景失效。③ `elevator_id` 收紧为**整型 number**（'3'/'1e2'/[3] 一律形态错 400 点名，禁 Number() 宽松转换导致的串台核对）；脏项点名改带序号的 `elevator_checks[i]` 合成定位项（避免 `elevator:0` 同 key 碰撞，域外回显同订正 2 先例）。④ 不一致标红行与明细行同快照：重提同事务先清后插。⑤ **路由计数订正**：§3.3 经订正 20 后实装为 1 条（GET /elevators/expected），订正 17 记的「路由 33→34」现净为 **33 条**（电梯 2→1）。联动：决策记录 D-T22 修订（增补 17）、技术方案修订 26、台账增补 #31、任务分解修订 34。
