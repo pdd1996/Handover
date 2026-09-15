@@ -10,13 +10,18 @@ import {
   TASK_CARDS,
   USAGE_FIELDS,
   buildValidationError,
+  clockMinutesOf,
   DECREASED_GUARD_FIELDS,
   decreasedReadingsOf,
   eDayUseOf,
+  elevatorActualLabel,
+  elevatorExpectedLabel,
   GAS_CARD_FIELDS,
   gasDayUseOf,
   isFilledValue,
+  isMismatchOf,
   isRequiredField,
+  expectedStatusAt,
   loDayUseOf,
   localMeasuredAt,
   numericMaxOf,
@@ -27,15 +32,18 @@ import {
   unconfirmedNeedConfirmItems,
   needConfirmItemsExcludingHits,
   decreaseHitKey,
+  validateElevatorChecks,
   validatePrevBackfillReadings,
   validateFields,
   waterDayUseOf,
+  isValidLocalTimestamp,
   type BackfillPayloadDto,
   type BadgeDto,
   type CardDef,
   type CardDto,
   type CardFieldStateDto,
   type ConfirmationPayload,
+  type ElevatorPlanLike,
   type FieldValueGetter,
   type MissingField,
   type PrevBackfillField,
@@ -57,7 +65,17 @@ import {
 import type { SessionUser } from '../auth/auth.service';
 import { ApiException } from '../common/api-error';
 import { DB, type Db } from '../db/db.module';
-import { auditLogs, configs, records, schedules, spots, users } from '../db/schema';
+import {
+  alerts,
+  auditLogs,
+  configs,
+  elevatorChecks,
+  elevators,
+  records,
+  schedules,
+  spots,
+  users,
+} from '../db/schema';
 import {
   DEFAULT_BACKFILL_WINDOW_DAYS,
   DEFAULT_SHIFT_START,
@@ -110,37 +128,8 @@ const INT_COLUMNS: ReadonlySet<RecordFieldName> = new Set<RecordFieldName>([
   'b_pulm',
 ]);
 
-/** 本地时间戳字面量格式（DATA-13 测量时刻随 payload 上送的形态，calc.ts localMeasuredAt）；
- * 分域捕获组（TK-12 评审修复轮 M3：原 \d 宽松正则放过 '2026-13-45 99:99:99'，MySQL 拒绝 → 500） */
-const MEASURED_AT_PATTERN =
-  /^(\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01]) ([01]\d|2[0-3]):([0-5]\d):([0-5]\d)$/;
-
-/**
- * 测量时刻合法性（TK-12 评审修复轮 M3）：分域正则 + **日历有效性**（Date 构造往返比对，
- * 拦住 02-30、04-31 等分域正则拦不住的非法日期）。非法值置 NULL（不拦提交、不覆盖为
- * 服务端时刻——本机时刻是唯一权威，无效即无从记录，D-P12）。
- */
-function isValidMeasuredAt(s: string): boolean {
-  const g = MEASURED_AT_PATTERN.exec(s);
-  if (!g) return false;
-  // noUncheckedIndexedAccess 下捕获组为 string|undefined；正则命中时组必存在，?? NaN 仅安抚类型
-  const num = (v: string | undefined): number => Number(v ?? NaN);
-  const y = num(g[1]);
-  const mo = num(g[2]);
-  const d = num(g[3]);
-  const h = num(g[4]);
-  const mi = num(g[5]);
-  const sec = num(g[6]);
-  const date = new Date(y, mo - 1, d, h, mi, sec);
-  return (
-    date.getFullYear() === y &&
-    date.getMonth() === mo - 1 &&
-    date.getDate() === d &&
-    date.getHours() === h &&
-    date.getMinutes() === mi &&
-    date.getSeconds() === sec
-  );
-}
+/** 本地时间戳字面量格式与合法性校验已上移 shared `calc.ts isValidLocalTimestamp`（TK-17：
+ * 电梯核对时刻 D-T22 与测量时刻 DATA-13 同形态同校验；分域正则 + 日历有效性，TK-12 评审 M3） */
 
 /**
  * record_no 生成（TK-12 评审修复轮 L5 抽为纯函数供黄金值哨兵）：格式钉死自技术方案 §4.2
@@ -902,6 +891,55 @@ export class RecordsService {
   }
 
   /**
+   * 电梯字典判定映射（TK-17，D-T22）：仅在 payload 携带核对项时加载。存在性以**全字典行**
+   * 判定（含 retired——后台停用后撤回重提的既有核对仍可落库）；预期计算用行上
+   * plan_type/windows（status 不改变运行计划语义）。返回 null = 电梯不存在。
+   */
+  private async elevatorPlanMapOf(): Promise<
+    Map<number, { name: string; plan: ElevatorPlanLike }>
+  > {
+    const rows = await this.db.select().from(elevators);
+    return new Map(
+      rows.map((r) => [
+        r.id,
+        {
+          name: r.name,
+          plan: { plan_type: r.planType, windows: r.windows } satisfies ElevatorPlanLike,
+        },
+      ]),
+    );
+  }
+
+  /**
+   * 电梯核对结果校验（TK-17，D-T22）：shared `validateElevatorChecks` 纯校验（api 与 h5
+   * 离线预检同源）+ 服务端按 check_time 重算 expected 的解析器——**ELE-05「提交时不重算」
+   * 的实现口径 = 不按提交/重提时刻重算，预期恒按核对时刻（D-P16 字面）**，客户端 expected
+   * 仅为展示留痕不落库。check_time 时钟分量非法时解析器返回 null（该校验项已在纯校验内
+   * 先行 400 点名，此处仅防御性兑底）。
+   */
+  private async validateElevatorCheckPayload(input: unknown): Promise<
+    ReturnType<typeof validateElevatorChecks> & {
+      /** 电梯字典判定映射（alerts 标红文案需电梯名；payload 未携带核对项时为 null） */
+      plans: Map<number, { name: string; plan: ElevatorPlanLike }> | null;
+    }
+  > {
+    const plans = input == null ? null : await this.elevatorPlanMapOf();
+    return {
+      ...validateElevatorChecks(
+        input,
+        (id, checkTime) => {
+          const entry = plans?.get(id);
+          if (!entry) return null;
+          const minutes = clockMinutesOf(checkTime.slice(11, 16));
+          return minutes === null ? null : expectedStatusAt(entry.plan, minutes);
+        },
+        (id) => plans?.get(id)?.name ?? null,
+      ),
+      plans,
+    };
+  }
+
+  /**
    * payload.sections → records 列值（TS 键）。职责边界：
    * - 字典外键忽略；派生列（lo_night_use 等非存储列）经 recordKeyOf 判定后不落库；
    * - 数值：parseNumeric（十进制字面量）复验后，decimal 列存字符串保精度、INT 列转 number；
@@ -953,8 +991,8 @@ export class RecordsService {
         values[key] = raw;
       } else if (def.kind === 'time') {
         const s = typeof raw === 'string' ? raw.trim() : '';
-        // M3：分域正则 + 日历有效性（isValidMeasuredAt），非法置 NULL 而非把垃圾送进 MySQL（500）
-        values[key] = isValidMeasuredAt(s) ? s : null;
+        // M3：分域正则 + 日历有效性（shared isValidLocalTimestamp），非法置 NULL 而非把垃圾送进 MySQL（500）
+        values[key] = isValidLocalTimestamp(s) ? s : null;
       } else {
         values[key] = typeof raw === 'string' ? raw.trim() : raw;
       }
@@ -997,6 +1035,11 @@ export class RecordsService {
     // 防呆确认项同口径预检（评审修复轮 M1）：超长原因/非数组在预览即点名
     const confirmCheck = this.validateConfirmations(payload?.confirmations);
     result.outOfRange.push(...confirmCheck.outOfRange);
+    // 电梯核对同口径预检（TK-17，D-T22；M3/L4「预检即点名」纪律）：与 submit 消费同一
+    // validateElevatorChecks——越值/重复/时刻非法在预览即点名，不一致未填说明进未填清单
+    const elevatorCheck = await this.validateElevatorCheckPayload(payload?.elevator_checks);
+    result.missing.push(...elevatorCheck.explanationMissing);
+    result.outOfRange.push(...elevatorCheck.outOfRange);
 
     const body = buildValidationError(result);
     return {
@@ -1126,6 +1169,11 @@ export class RecordsService {
     // 超长原因/非数组在第 1 步即 400 点名，不再带病走到第 2 步撞审计列容量
     const confirmCheck = this.validateConfirmations(payload?.confirmations);
     result.outOfRange.push(...confirmCheck.outOfRange);
+    // 电梯核对校验（TK-17，ELE-04/06/07；D-T22）：与 preview 消费同一 validateElevatorChecks
+    // 纯校验 + 服务端按 check_time 重算 expected 的解析器（plans 仅在有核对项时加载）；
+    // 越值/重复/时刻非法/电梯不存在并入第 1 步 400 清单，说明缺失在防呆 409 之后单独 409
+    const elevatorCheck = await this.validateElevatorCheckPayload(payload?.elevator_checks);
+    result.outOfRange.push(...elevatorCheck.outOfRange);
 
     const body = buildValidationError(result);
     if (body) {
@@ -1211,6 +1259,17 @@ export class RecordsService {
         { needConfirm },
       );
     }
+    // 电梯不一致未填说明（TK-17，ELE-04-T2/ELE-07-T1）：409 ELEVATOR_EXPLANATION_REQUIRED，
+    // 逐台以 `elevator:{id}` 点名（C-09 电梯点名形态，契约 §2；明细落 elevator_checks 逐台
+    // 一行、records 无对应列）——置于防呆 409 之后（契约 §4 第 2 步判定先于电梯说明缺失暴露，
+    // 同为 409 族；合法 payload 才走到这里，不会掩盖第 1 步的 400 点名）
+    if (elevatorCheck.explanationMissing.length > 0) {
+      throw new ApiException(
+        'ELEVATOR_EXPLANATION_REQUIRED',
+        '电梯核对与预期不一致，请逐台填写说明后重新提交',
+        { missingFields: elevatorCheck.explanationMissing },
+      );
+    }
     // 确认留痕清单（契约 §5「record.submit + 各确认原因」）：仅**命中项**的确认入账——
     // 对未命中字段的确认不写审计（确认与防呆项一一对应，多行失真同覆盖重复项 L4 纪律）
     const confirmAudits = [
@@ -1285,6 +1344,41 @@ export class RecordsService {
           ...usage.values,
         });
         recordId = inserted[0].insertId;
+      }
+
+      // 电梯核对明细与标红（TK-17，D-T22）：快照语义——重提（撤回/补交接管 draft）先清后插，
+      // 核对以本次提交为准；expected 为服务端按 check_time 重算值（ELE-05「锁定核对时刻」：
+      // 提交/重提时刻不参与计算，D-P16）；任一不一致写 alerts 标红行（ELE-06，level=mid：
+      // Phase 1 标红 + 必填说明，P2 转中预警推送；契约 §4 第 4 步「电梯不一致」）。
+      // 核对不强制：未上送或空数组 = 本班次未核对，无明细行也无标红（追责载体为逐条知晓）
+      // L3（评审修复轮）：alerts 与明细行**同一快照语义**——原只清 elevator_checks，重提时
+      // 旧标红行会累积（同一条不一致重复入行、已不成立的旧项残留），接班人逐条知晓（TK-19）
+      // 会看到重复/过期标红项。标红确认行由本提交事务生成（契约 §4 第 4 步），故重建也在此：
+      // 后续若新增其它来源的 alerts 写入方，需按其主权环节同步调整本处范围
+      await tx.delete(elevatorChecks).where(eq(elevatorChecks.recordId, recordId));
+      await tx.delete(alerts).where(eq(alerts.recordId, recordId));
+      for (const c of elevatorCheck.valid) {
+        await tx.insert(elevatorChecks).values({
+          recordId,
+          elevatorId: c.elevator_id,
+          checkTime: c.check_time,
+          expected: c.expected,
+          actual: c.actual,
+          explanation: c.explanation,
+        });
+        if (isMismatchOf(c.actual)) {
+          const name = elevatorCheck.plans?.get(c.elevator_id)?.name ?? `电梯#${c.elevator_id}`;
+          const message =
+            `${name} 预期${elevatorExpectedLabel(c.expected)}、实际${elevatorActualLabel(c.actual)}` +
+            (c.explanation ? `：${c.explanation}` : '');
+          await tx.insert(alerts).values({
+            recordId,
+            ruleKey: 'elevator_mismatch',
+            target: `elevator:${c.elevator_id}`,
+            level: 'mid',
+            message: message.slice(0, 300),
+          });
+        }
       }
 
       // 审计（契约 §5：action=record.submit；接班人修改原因记 reason 列，DATA-10 留痕）
@@ -1453,6 +1547,9 @@ export class RecordsService {
 
     // 角标分母只数 required 字段：未触发的条件必填（异常备注、停机时的锅炉三项）不计入，
     // 否则师傅填完该填的进度条也到不了 100%，违反 F1-03-T1「计数与实际一致」。口径见 cards.ts isRequiredField。
+    // 电梯卡（TK-17）无 records 字段：不把逐台核对计入分母——D-T16 分母口径为**字段维度**
+    // （fill ∈ manual/select 且非条件必填/选填），改动须先修决策；电梯卡维持 0/0 的「待核对」态
+    // （TaskCard），客户端首页以草稿核对项判定「已填」（TodayView anyFilledOf），不进度条分母
     const countable = fields.filter((f) => f.required);
     const filled = countable.filter((f) => f.filled).length;
     const abnormal = fields.filter((f) => f.abnormal).length;
