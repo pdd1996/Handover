@@ -158,3 +158,37 @@ export function localMeasuredAt(date: Date = new Date()): string {
     `${p(date.getHours())}:${p(date.getMinutes())}:${p(date.getSeconds())}`
   );
 }
+
+/**
+ * 本地时间戳字面量的**合法性校验**（TK-17 自 api 私有实现上移：电梯核对时刻 D-T22 与
+ * 测量时刻 DATA-13 同形态、同校验，调用方不再各抄一份正则）。
+ *
+ * 分域捕获组（TK-12 评审修复轮 M3：原 \d 宽松正则放过 '2026-13-45 99:99:99'，MySQL 拒绝
+ * → 500）+ **日历有效性**（Date 构造往返比对，拦住 02-30、04-31 等分域正则拦不住的
+ * 非法日期）。消费方：api 提交侧对 lo_measured_am/pm（非法置 NULL 不拦提交）与
+ * elevator_checks[].check_time（非法 400 点名——核对时刻缺失即无法锁定预期，ELE-05）。
+ */
+const LOCAL_TIMESTAMP_PATTERN =
+  /^(\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01]) ([01]\d|2[0-3]):([0-5]\d):([0-5]\d)$/;
+
+export function isValidLocalTimestamp(s: string): boolean {
+  const g = LOCAL_TIMESTAMP_PATTERN.exec(s);
+  if (!g) return false;
+  // noUncheckedIndexedAccess 下捕获组为 string|undefined；正则命中时组必存在，?? NaN 仅安抚类型
+  const num = (v: string | undefined): number => Number(v ?? NaN);
+  const y = num(g[1]);
+  const mo = num(g[2]);
+  const d = num(g[3]);
+  const h = num(g[4]);
+  const mi = num(g[5]);
+  const sec = num(g[6]);
+  const date = new Date(y, mo - 1, d, h, mi, sec);
+  return (
+    date.getFullYear() === y &&
+    date.getMonth() === mo - 1 &&
+    date.getDate() === d &&
+    date.getHours() === h &&
+    date.getMinutes() === mi &&
+    date.getSeconds() === sec
+  );
+}

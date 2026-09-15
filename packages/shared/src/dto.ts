@@ -17,6 +17,8 @@ import type { RecordFieldName } from './fields';
 import type { SectionNo } from './sections';
 import type { PrevBackfillField } from './guard';
 import type { ConfirmationPayload, DutyGuardConfirm, MissingField, ConfirmItem } from './errors';
+import type { ElevatorCheckPayload, ElevatorExpected } from './elevator';
+import type { ElevatorPlanType } from './enums';
 
 // ── 契约 §3.2 GET /records/today（今日交接首页；F1-01、F1-02、F1-03）─────────
 
@@ -210,6 +212,16 @@ export interface SubmitPayloadDto {
    * 列（缺失班次不建行，不伪造当日记录），以审计 `record.prev_backfill` 留痕（D-T19）。
    */
   prev_readings?: Readonly<Partial<Record<PrevBackfillField, unknown>>>;
+  /**
+   * 逐台电梯核对结果（TK-17，ELE-04/06/07；契约 §3.3 的 POST /records/today/elevator-checks
+   * 经决策记录 **D-T22** 订正为并入本提交协议——elevator_checks.record_id NOT NULL，
+   * 提交前无 records 行可挂，独立端点的写副作用与 D-T15/D-T18 同族冲突；随 payload 走
+   * 离线队列免费可用）。服务端按上送 check_time（核对时刻）重算 expected 落库（ELE-05
+   * 「提交时不重算」= 不按提交时刻重算，D-P16 字面），不一致必填说明（缺则 409
+   * ELEVATOR_EXPLANATION_REQUIRED），任一不一致写 alerts 标红行（ELE-06，D-T22 ③）。
+   * 校验纯函数 shared validateElevatorChecks（api 与 h5 离线预检同源）。
+   */
+  elevator_checks?: readonly ElevatorCheckPayload[];
 }
 
 /**
@@ -298,6 +310,33 @@ export interface SubmitResultDto {
    * 逐变更项审计 `record.recalc`（契约 §5），手工覆盖项豁免（D-T07）。
    */
   recalc?: RecalcResultDto | null;
+}
+
+// ── 契约 §3.3 GET /elevators/expected（电梯逐台预期状态；ELE-03；TK-17/D-T22）─────────
+
+/** 单台电梯的预期状态（打开电梯板块时逐台展示「预期：运行/停运」，ELE-03） */
+export interface ElevatorExpectedItemDto {
+  id: number;
+  name: string;
+  /** 运行计划三选一（ELE-02；回显供前端展示计划说明，不重查字典） */
+  plan_type: ElevatorPlanType;
+  /** 运行时段（§4.2 windows JSON 原样回显；前端渲染「06:00–21:00」类说明） */
+  windows: unknown;
+  /** 长期停运原因（plan_type='stopped' 时展示） */
+  stop_reason: string | null;
+  /** 按本响应 check_time 计算的预期状态（脏配置回落 run，shared expectedStatusAt） */
+  expected: ElevatorExpected;
+}
+
+/**
+ * GET /elevators/expected 响应体（TK-17，D-T22：**只读计算不落库**——原契约「生成
+ * elevator_checks 明细行」的写副作用被否决；核对结果随提交 payload 落库并锁定）。
+ */
+export interface ElevatorExpectedDto {
+  /** 本次响应的核对时刻基准（服务端本地时间戳 `YYYY-MM-DD HH:mm:ss`）；前端锁定入草稿 */
+  check_time: string;
+  /** 在用（status='active'）电梯逐台预期，按 id 升序 */
+  elevators: readonly ElevatorExpectedItemDto[];
 }
 
 // ── 契约 §3.2 GET /records/today/prev（上一班读数带出；F1-05、F1-15、DATA-02、F3-07；TK-07）─────────
