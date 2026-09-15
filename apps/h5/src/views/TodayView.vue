@@ -36,11 +36,15 @@ const props = defineProps<{
   queueCount?: number;
   /** 排空中（排空按钮 loading 与同步角标） */
   syncing?: boolean;
+  /** 待确认交接单数（TK-18，F2-02；GET /records/pending，仅 master 拉取） */
+  pendingCount?: number;
 }>();
 defineEmits<{
   (e: 'open', key: string): void;
   (e: 'submit'): void;
   (e: 'sync'): void;
+  /** 打开待确认入口（TK-18，F2-02） */
+  (e: 'confirm'): void;
 }>();
 
 const { getValue: getDraft } = useDraft();
@@ -221,6 +225,19 @@ const syncText = computed(() => {
           立即同步
         </van-button>
       </div>
+
+      <!-- 待确认入口（TK-18，F2-02）：接班人登录醒目提示「有 N 份交接单待确认」，
+           置于卡片列表之前（视觉首要位）；计数来自接口 items.length，与实际一致 -->
+      <button
+        v-if="(pendingCount ?? 0) > 0"
+        type="button"
+        class="mt-3 flex w-full items-center justify-between rounded-xl bg-red-600 px-4 py-3 text-left text-white shadow-md"
+        data-testid="pending-entry"
+        @click="$emit('confirm')"
+      >
+        <span class="text-base font-bold">有 {{ pendingCount }} 份交接单待确认</span>
+        <span class="text-xs opacity-90">接班核对 · 点击查看</span>
+      </button>
 
       <!-- 巡检动线提示（对齐 demo v0.3 首页提示语：按巡检路线到点位点开卡片） -->
       <div class="my-3 text-sm leading-relaxed text-slate-600">

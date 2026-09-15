@@ -13,8 +13,10 @@ import type {
   ApiError,
   ElevatorExpectedDto,
   FormOptionsDto,
+  PendingListDto,
   PrevDto,
   PreviewDto,
+  RecordDetailDto,
   SubmitPayloadDto,
   SubmitResultDto,
   TodayDto,
@@ -125,5 +127,15 @@ export const api = {
   /** POST /records/today/submit —— 正式提交（F2-01：生成正式交接单，TK-12） */
   submit(payload: SubmitPayloadDto): Promise<SubmitResultDto> {
     return http('/records/today/submit', { method: 'POST', body: JSON.stringify(payload) });
+  },
+
+  /** GET /records/pending —— 待确认列表（F2-02「有 N 份交接单待确认」，TK-18；仅 master） */
+  pending(): Promise<PendingListDto> {
+    return http('/records/pending');
+  },
+
+  /** GET /records/{id} —— 交接单详情（F2-03 逐项浏览，标红项置顶序由服务端排好，TK-18） */
+  recordDetail(id: number): Promise<RecordDetailDto> {
+    return http(`/records/${id}`);
   },
 };

@@ -35,9 +35,11 @@ import {
   type FieldValueGetter,
   type FormOptionsDto,
   type MissingField,
+  type PendingRecordDto,
   type PrevBackfillField,
   type PrevDto,
   type PreviewDto,
+  type RecordDetailDto,
   type SubmitPayloadDto,
   type TodayDto,
   type UsageOverridePayload,
@@ -45,6 +47,7 @@ import {
 import { ApiRequestError, NetworkError, api, type AuthUser } from './api/client';
 import TodayView from './views/TodayView.vue';
 import SectionView from './views/SectionView.vue';
+import ConfirmView from './views/ConfirmView.vue';
 import { useDraft } from './store/draft';
 import {
   enqueueQueueItem,
@@ -102,6 +105,57 @@ const configs = ref<FormOptionsDto | null>(null);
  * 需联网获取，不阻塞其它卡填写。
  */
 const elevatorExpected = ref<ElevatorExpectedDto | null>(null);
+
+/**
+ * 待确认列表与交接确认页状态（TK-18，F2-02/F2-03）：登录后按角色拉取（仅 master——
+ * 待确认入口是接班人的待办，契约 §3.4 角色列 master）；confirming 打开列表页，
+ * confirmDetail 打开单份详情（逐项浏览，标红置顶）。拉取失败静默降级为无入口
+ * （只读待办，不阻塞填写主链路），401 并入 handleSessionLoss 单一入口。
+ */
+const pendingItems = ref<PendingRecordDto[]>([]);
+const confirming = ref(false);
+const confirmDetail = ref<RecordDetailDto | null>(null);
+const detailLoading = ref(false);
+
+async function loadPending(): Promise<void> {
+  if (user.value?.role !== 'master') {
+    pendingItems.value = [];
+    return;
+  }
+  try {
+    pendingItems.value = [...(await api.pending()).items];
+  } catch (err) {
+    if (!handleSessionLoss(err)) pendingItems.value = [];
+  }
+}
+
+/** 打开待确认列表（TodayView 醒目入口） */
+function openConfirm(): void {
+  confirming.value = true;
+}
+
+/** 打开单份交接单详情（F2-03 逐项浏览） */
+async function openPendingItem(id: number): Promise<void> {
+  detailLoading.value = true;
+  try {
+    confirmDetail.value = await api.recordDetail(id);
+  } catch (err) {
+    if (!handleSessionLoss(err)) notify(err);
+  } finally {
+    detailLoading.value = false;
+  }
+}
+
+/** 确认页返回：详情态回列表，列表态回首页 */
+function onConfirmBack(): void {
+  if (confirmDetail.value) {
+    confirmDetail.value = null;
+    // 回列表前刷新：确认状态可能已变（TK-19 归档后单据消失），计数与实际保持一致（F2-02-T1）
+    void loadPending();
+    return;
+  }
+  confirming.value = false;
+}
 
 /** 电梯卡 key（shared cards 字典中 kind='elevator' 的唯一卡；跳转定位与打开监听共用） */
 const ELEVATOR_CARD_KEY =
@@ -184,6 +238,10 @@ function resetSession(): void {
   prevCache.value = null;
   configs.value = null;
   elevatorExpected.value = null;
+  pendingItems.value = [];
+  confirming.value = false;
+  confirmDetail.value = null;
+  detailLoading.value = false;
   queueItems.value = [];
   syncing.value = false; // M5（评审修复轮）：登出/会话失效打断在途排空，不得残留锁
   sessionEpoch += 1;
@@ -243,6 +301,7 @@ async function loadToday(): Promise<void> {
     today.value = await api.today();
     void loadPrev();
     void loadConfigs();
+    void loadPending(); // TK-18：接班人待确认入口（F2-02），仅 master 角色实际拉取
     // F1-09 续填入口：登录态 + 班次键就绪后恢复持久草稿；恢复了有内容的草稿则给
     // 「草稿恢复提示」（PRD §6.1 设计触点）。restore 同键幂等（backToToday 重复调用不重灌）
     if (user.value && (await draft.restore(user.value.id, today.value.duty_date))) {
@@ -917,6 +976,16 @@ watch(
     @back="backToToday"
   />
 
+  <!-- 交接确认页（TK-18，F2-02/F2-03）：列表与详情两级，组件内切换 -->
+  <ConfirmView
+    v-else-if="confirming"
+    :items="pendingItems"
+    :detail="confirmDetail"
+    :loading="detailLoading"
+    @back="onConfirmBack"
+    @open="openPendingItem"
+  />
+
   <!-- 今日交接首页（F1-01 / F1-02 / F1-03） -->
   <template v-else>
     <TodayView
@@ -926,9 +995,11 @@ watch(
       :pending-sync="queueItems.length > 0"
       :queue-count="queueItems.length"
       :syncing="syncing"
+      :pending-count="pendingItems.length"
       @open="openCard"
       @submit="onOpenPreview"
       @sync="drainQueue"
+      @confirm="openConfirm"
     />
     <div v-else class="flex min-h-screen items-center justify-center bg-slate-100">
       <van-loading v-if="loadingToday" size="24" vertical>加载今日交接…</van-loading>
