@@ -11,7 +11,8 @@
  * ——TK-04 已评审验收，不为迁移而动它；后续接口扩充时一并归入本文件。
  */
 
-import type { RecordStatus } from './enums';
+import type { ElevatorCheckActual, RecordStatus } from './enums';
+import type { AlertLevel } from './alerts';
 import type { UsageFieldName } from './calc';
 import type { RecordFieldName } from './fields';
 import type { SectionNo } from './sections';
@@ -310,6 +311,98 @@ export interface SubmitResultDto {
    * 逐变更项审计 `record.recalc`（契约 §5），手工覆盖项豁免（D-T07）。
    */
   recalc?: RecalcResultDto | null;
+}
+
+// ── 契约 §3.4 交接确认（接班人；F2-02、F2-03；TK-18）─────────────────────────────
+
+/**
+ * GET /records/pending 的单行（F2-02 待确认入口与逐项浏览列表）。
+ * 取数口径（契约 §3.4）：**我为 receiver 且 status=submitted**——draft（撤回未重提，
+ * D-T18）与 objection/completed（已退回/已归档）均不产生待确认入口（F2-08「接班人端
+ * 待确认入口同步消失」的取数半边）。
+ */
+export interface PendingRecordDto {
+  id: number;
+  record_no: string;
+  /** 班次起始日（C-08）；待确认单通常是昨日班次（接班人 = 次日排班人，F2-01） */
+  duty_date: string;
+  /** 恒 'submitted'（见上方取数口径） */
+  status: RecordStatus;
+  version: number;
+  submitted_at: string | null;
+  /** 交班人（回显姓名，接班人核对「谁交给我」） */
+  submitter: { id: number; real_name: string };
+  /** 标红确认项数（alerts 行数，含状态异常/电梯不一致/交接事项拆条；TK-19 起逐条知晓） */
+  alert_count: number;
+}
+
+/** GET /records/pending 响应体（按 duty_date 降序） */
+export interface PendingListDto {
+  items: readonly PendingRecordDto[];
+}
+
+/**
+ * 标红确认项（alerts 行，技术方案 §5.3）：F2-03 置顶高亮与 TK-19 逐条"已知晓"的共同
+ * 数据源。`acknowledged_*` 本阶段恒 null（逐条知晓随 TK-19 落地），字段先行以稳定形状。
+ */
+export interface AlertDto {
+  id: number;
+  rule_key: string;
+  /** 定位目标：状态异常/交接事项为 `field:{列名}`、电梯不一致为 `elevator:{id}`（生成形态见 shared alerts.ts） */
+  target: string | null;
+  level: AlertLevel;
+  message: string;
+  acknowledged_by: number | null;
+  acknowledged_at: string | null;
+}
+
+/** 单台电梯核对明细（GET /records/{id} 的 elevator_checks 逐台一行 + 电梯名回显） */
+export interface ElevatorCheckRecordDto {
+  elevator_id: number;
+  /** 电梯名（联 elevators 字典回显；字典行已被删时为 null，显示原始 id） */
+  elevator_name: string | null;
+  check_time: string;
+  expected: ElevatorExpected;
+  /**
+   * 核对结果。schema 未加 NOT NULL（§4.2 原样），落库路径（提交 payload 校验）恒有值；
+   * 极端历史脏行允许 null，前端显示 "—"。
+   */
+  actual: ElevatorCheckActual | null;
+  explanation: string | null;
+}
+
+/**
+ * GET /records/{id} 响应体（F2-03 逐项浏览、F5-01 历史详情共用，契约 §3.4「含全部
+ * 读数、标红项（alerts）、电梯核对、版本摘要、双方确认信息」）。
+ * `alerts` 由服务端排好**置顶序**（level high→mid→low，同级按 id 升序，shared
+ * ALERT_LEVEL_RANK），前端直接顺序渲染即满足 F2-03-T1。
+ */
+export interface RecordDetailDto {
+  id: number;
+  record_no: string;
+  duty_date: string;
+  status: RecordStatus;
+  version: number;
+  submitted_at: string | null;
+  /** 交班人（C-05 实名） */
+  submitter: { id: number; real_name: string };
+  /** 接班人（带出或修改后；无排班为 null） */
+  receiver: { id: number; real_name: string } | null;
+  /** 接班人修改原因（DATA-10 留痕；未修改为 null） */
+  receiver_change_reason: string | null;
+  /**
+   * 全部读数：字段字典内 records 存储列（板块 ≥1，蛇形列名 → 原值，decimal 为字符串
+   * 与 Drizzle 一致）；与 GET /records/today/prev 的 readings 同一取数范围。
+   */
+  readings: Readonly<Partial<Record<RecordFieldName, unknown>>>;
+  /** 标红确认项（**置顶序**已排好，见接口注） */
+  alerts: readonly AlertDto[];
+  /** 逐台电梯核对明细（按落库序） */
+  elevator_checks: readonly ElevatorCheckRecordDto[];
+  /** 确认归档时刻（F2-05「确认时间可查」；未确认为 null，TK-19 起） */
+  confirmed_at: string | null;
+  /** 签名图路径（F2-05；未签名为 null） */
+  signature_path: string | null;
 }
 
 // ── 契约 §3.3 GET /elevators/expected（电梯逐台预期状态；ELE-03；TK-17/D-T22）─────────
