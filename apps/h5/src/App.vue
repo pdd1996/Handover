@@ -12,7 +12,7 @@
  * 刷新页面后靠 GET /auth/me 恢复登录态（401 则回登录页）。
  */
 import { computed, nextTick, onMounted, ref, watch } from 'vue';
-import { showToast } from 'vant';
+import { showSuccessToast, showToast } from 'vant';
 import {
   CARD_BY_FIELD,
   CARD_BY_KEY,
@@ -143,6 +143,38 @@ async function openPendingItem(id: number): Promise<void> {
     if (!handleSessionLoss(err)) notify(err);
   } finally {
     detailLoading.value = false;
+  }
+}
+
+/**
+ * 逐条"已知晓"（TK-19，F2-04/DATA-08/DEP-08）：单条上送后重拉详情，
+ * acknowledged_at 服务端回读（首次知晓时刻即留痕，重复点击不覆盖）。
+ */
+async function acknowledgeAlert(alertId: number): Promise<void> {
+  const detail = confirmDetail.value;
+  if (!detail) return;
+  try {
+    await api.acknowledge(detail.id, [alertId]);
+    confirmDetail.value = await api.recordDetail(detail.id);
+  } catch (err) {
+    if (!handleSessionLoss(err)) notify(err);
+  }
+}
+
+/**
+ * 签名归档（TK-19，F2-05）：C-05 姓名二次确认已在 ConfirmView 完成；成功后归档单据
+ * 离开待确认列表（status=completed 不产生入口，F2-02 取数口径），回列表并刷新计数。
+ */
+async function signRecord(signature: string): Promise<void> {
+  const detail = confirmDetail.value;
+  if (!detail) return;
+  try {
+    await api.confirmRecord(detail.id, signature);
+    confirmDetail.value = null;
+    await loadPending();
+    showSuccessToast('交接单已确认归档');
+  } catch (err) {
+    if (!handleSessionLoss(err)) notify(err);
   }
 }
 
@@ -982,8 +1014,11 @@ watch(
     :items="pendingItems"
     :detail="confirmDetail"
     :loading="detailLoading"
+    :user-name="user?.real_name ?? ''"
     @back="onConfirmBack"
     @open="openPendingItem"
+    @acknowledge="acknowledgeAlert"
+    @sign="signRecord"
   />
 
   <!-- 今日交接首页（F1-01 / F1-02 / F1-03） -->

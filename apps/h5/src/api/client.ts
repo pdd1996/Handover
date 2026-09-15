@@ -10,7 +10,9 @@
  * 前端不另写 interface（否则两处随迭代漂移）。
  */
 import type {
+  AcknowledgeResultDto,
   ApiError,
+  ConfirmResultDto,
   ElevatorExpectedDto,
   FormOptionsDto,
   PendingListDto,
@@ -137,5 +139,27 @@ export const api = {
   /** GET /records/{id} —— 交接单详情（F2-03 逐项浏览，标红项置顶序由服务端排好，TK-18） */
   recordDetail(id: number): Promise<RecordDetailDto> {
     return http(`/records/${id}`);
+  },
+
+  /**
+   * POST /records/{id}/acknowledge —— 逐条"已知晓"（F2-04/DATA-08/DEP-08，TK-19）：
+   * 逐条上送本条确认行 id；响应 acknowledged 为本次新写入行数（重复点击不覆盖首次时刻）。
+   */
+  acknowledge(id: number, alertIds: readonly number[]): Promise<AcknowledgeResultDto> {
+    return http(`/records/${id}/acknowledge`, {
+      method: 'POST',
+      body: JSON.stringify({ alert_ids: alertIds }),
+    });
+  },
+
+  /**
+   * POST /records/{id}/confirm —— 签名归档（F2-05，TK-19）：签名板 PNG data URL 上送；
+   * 服务端校验全部确认行已知晓（未逐条知晓 → 409 CONFIRM_INCOMPLETE），成功转 completed。
+   */
+  confirmRecord(id: number, signature: string): Promise<ConfirmResultDto> {
+    return http(`/records/${id}/confirm`, {
+      method: 'POST',
+      body: JSON.stringify({ signature }),
+    });
   },
 };
