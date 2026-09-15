@@ -1,6 +1,10 @@
 import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
 import type {
+  AcknowledgePayloadDto,
+  AcknowledgeResultDto,
   BackfillPayloadDto,
+  ConfirmPayloadDto,
+  ConfirmResultDto,
   PendingListDto,
   PrevDto,
   PreviewDto,
@@ -133,6 +137,44 @@ export class RecordsController {
     @Body() payload: BackfillPayloadDto,
   ): Promise<SubmitResultDto> {
     return this.records.backfill(user, payload);
+  }
+
+  /**
+   * POST /api/v1/records/{id}/acknowledge —— 逐条"已知晓"（TK-19，契约 §3.4；F2-04/DATA-08/DEP-08）。
+   *
+   * body 传 `alert_ids[]`（shared dto AcknowledgePayloadDto），逐条写 alerts.acknowledged_by/at
+   * （响应 `{acknowledged}` = 本次新写入行数，已知晓行不覆盖首次时刻）；仅接班人本人
+   * （服务层 403，C-05 实名/D-P06 责任锚点）；跨单/未知 id 忽略（容错同提交侧确认消费）。
+   * 角色：`master`——待确认入口是接班人的待办，同 GET /records/pending 口径。
+   */
+  @Post(':id/acknowledge')
+  @UseGuards(SessionGuard, RolesGuard)
+  @Roles('master')
+  acknowledge(
+    @CurrentUser() user: SessionUser,
+    @Param('id') id: string,
+    @Body() payload: AcknowledgePayloadDto,
+  ): Promise<AcknowledgeResultDto> {
+    return this.records.acknowledge(user, Number(id), payload);
+  }
+
+  /**
+   * POST /api/v1/records/{id}/confirm —— 签名归档（TK-19，契约 §3.4；F2-04/F2-05）。
+   *
+   * body 传签名图 PNG data URL（shared dto ConfirmPayloadDto）；服务端校验全部确认行
+   * 已知晓（完整性终校与转 completed 同事务，未逐条知晓 → 409 CONFIRM_INCOMPLETE，
+   * F2-04-T1）；成功转 completed + confirmed_at=服务端时刻 + signature_path 落盘落库
+   * + 审计 `record.confirm`（契约 §5）；仅接班人本人。角色：`master`（同 acknowledge）。
+   */
+  @Post(':id/confirm')
+  @UseGuards(SessionGuard, RolesGuard)
+  @Roles('master')
+  confirm(
+    @CurrentUser() user: SessionUser,
+    @Param('id') id: string,
+    @Body() payload: ConfirmPayloadDto,
+  ): Promise<ConfirmResultDto> {
+    return this.records.confirm(user, Number(id), payload);
   }
 
   /**

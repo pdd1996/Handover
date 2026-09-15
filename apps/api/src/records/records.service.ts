@@ -1,5 +1,7 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { and, asc, count, desc, eq, inArray, lt } from 'drizzle-orm';
+import { and, asc, count, desc, eq, inArray, isNull, lt } from 'drizzle-orm';
+import { promises as fsp } from 'node:fs';
+import * as nodePath from 'node:path';
 import { alias, getTableConfig } from 'drizzle-orm/mysql-core';
 import {
   ALERT_LEVEL_RANK,
@@ -43,7 +45,11 @@ import {
   waterDayUseOf,
   isValidLocalTimestamp,
   type AlertDto,
+  type AcknowledgePayloadDto,
+  type AcknowledgeResultDto,
   type BackfillPayloadDto,
+  type ConfirmPayloadDto,
+  type ConfirmResultDto,
   type BadgeDto,
   type CardDef,
   type ElevatorCheckRecordDto,
@@ -148,6 +154,44 @@ export function recordNoOf(dutyDate: string): string {
   return `HB-${dutyDate.replaceAll('-', '')}-001`;
 }
 
+// ── 签名图解码与落盘（TK-19，F2-05「签名图可查」）────────────────────────────────
+
+/** 签名图大小护栏（data URL 解码后 ≤ 512KB；canvas 签名远小于此，防恶意超大 base64） */
+const SIGNATURE_MAX_BYTES = 512 * 1024;
+
+/** PNG 文件魔数（\x89PNG\r\n\x1a\n）：只认魔数不看扩展名，防改名上传任意内容 */
+const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+/**
+ * 签名图 data URL → PNG 字节流（不合法返回 null）：仅接受
+ * `data:image/png;base64,` 前缀（h5 签名板 canvas toDataURL('image/png') 产物）。
+ */
+function decodeSignature(dataUrl: string): Buffer | null {
+  const m = /^data:image\/png;base64,([A-Za-z0-9+/]+=*)$/.exec(dataUrl.trim());
+  if (!m) return null;
+  const buf = Buffer.from(m[1]!, 'base64');
+  if (buf.length < PNG_MAGIC.length || !buf.subarray(0, PNG_MAGIC.length).equals(PNG_MAGIC)) {
+    return null;
+  }
+  return buf;
+}
+
+/**
+ * 签名图落盘（库内记可服务路径，与《开发种子数据》§六 completed 单的
+ * `/uploads/signatures/*.png` 形态一致；生产由 Nginx 静态服 `/uploads`）。
+ * 目录由环境变量 `UPLOAD_DIR` 指定（测试注入临时目录），默认 `<cwd>/data/uploads`。
+ * 返回入库的 signature_path。
+ */
+async function writeSignatureFile(recordNo: string, png: Buffer): Promise<string> {
+  const dir = nodePath.join(
+    process.env.UPLOAD_DIR ?? nodePath.join(process.cwd(), 'data', 'uploads'),
+    'signatures',
+  );
+  await fsp.mkdir(dir, { recursive: true });
+  await fsp.writeFile(nodePath.join(dir, `${recordNo}.png`), png);
+  return `/uploads/signatures/${recordNo}.png`;
+}
+
 /**
  * 用量列（契约 §4 第 3 步：服务端计算固化、客户端传值不信任）。normalizeSections 先置 NULL
  * （sections里的 *_use 键恒不采信），提交时由 computeUsageValues 以计算值覆盖（TK-13），
@@ -170,6 +214,28 @@ const CONFIRMATION_BAD_PAYLOAD = (): MissingField => ({
   section: 0,
   label: '防呆确认项格式非法（须为数组）',
   anchor: '#sec-0-confirmations',
+});
+
+/** 知晓确认行请求体的合成定位项（TK-19，域外回显同 confirmations 先例） */
+const ALERT_IDS_BAD_PAYLOAD = (): MissingField => ({
+  field: 'alert_ids' as MissingTarget,
+  section: 0,
+  label: '知晓确认行格式非法（须为 id 数组）',
+  anchor: '#sec-0-alert-ids',
+});
+
+/** 签名图缺失/非法的合成定位项（TK-19，F2-05；同为域外回显先例） */
+const SIGNATURE_MISSING = (): MissingField => ({
+  field: 'signature' as MissingTarget,
+  section: 0,
+  label: '接班人签名',
+  anchor: '#sec-0-signature',
+});
+const SIGNATURE_BAD_PAYLOAD = (): MissingField => ({
+  field: 'signature' as MissingTarget,
+  section: 0,
+  label: '签名图格式非法（须为 PNG 图片）',
+  anchor: '#sec-0-signature',
 });
 
 const USAGE_OVERRIDE_BAD_PAYLOAD = (): MissingField => ({
@@ -586,6 +652,143 @@ export class RecordsService {
       confirmed_at: row.confirmedAt,
       signature_path: row.signaturePath,
     };
+  }
+
+  // ── 逐条知晓与签名归档（TK-19：契约 §3.4；F2-04、F2-05、DATA-08、DEP-08）─────────
+
+  /**
+   * 待确认单闸门（acknowledge/confirm 共用的存在性/归属/状态校验，单一实现防两套口径）：
+   * - 404 NOT_FOUND：单不存在（含非数字 id，与 detail 同一口径）；
+   * - 403 FORBIDDEN：登录人非该单接班人——逐条知晓与签名是责任界定的锚点（D-P06），
+   *   实名制 C-05 下只有接班人本人可确认；chief 被角色守卫挡在外（契约 §3.4 角色列 master）；
+   * - 409 CONFIRM_INCOMPLETE：非 submitted（draft/objection/completed 均无确认语义）——
+   *   契约错误码表 13 项之外不增设新码，按状态归入同一 409 族，文案区分语义。
+   */
+  private async confirmableRecordOf(
+    id: number,
+    user: SessionUser,
+  ): Promise<typeof records.$inferSelect> {
+    if (!Number.isInteger(id) || id <= 0) {
+      throw new ApiException('NOT_FOUND', '交接单不存在或已被删除');
+    }
+    const rows = await this.db.select().from(records).where(eq(records.id, id)).limit(1);
+    const row = rows[0];
+    if (!row) throw new ApiException('NOT_FOUND', '交接单不存在或已被删除');
+    if (row.receiverId !== user.id) {
+      throw new ApiException('FORBIDDEN', '仅接班人本人可逐条知晓与签名确认');
+    }
+    if (row.status !== 'submitted') {
+      throw new ApiException('CONFIRM_INCOMPLETE', '交接单当前状态不允许确认操作');
+    }
+    return row;
+  }
+
+  /**
+   * POST /records/{id}/acknowledge（F2-04/DATA-08/DEP-08 逐条"已知晓"）。
+   *
+   * 消费口径：非数组请求体 → 400 合成定位项点名（同 confirmations 先例）；跨单/不存在
+   * 的 id 在 where 条件下不命中即忽略（容错同提交侧确认消费）；已知晓的行不重复写
+   * （首次知晓时刻即留痕，不覆盖——acked_by/at 由 DB 层 isNull 条件保证幂等）。
+   * 留痕落 alerts 行本身（acknowledged_by/at 逐条落库），不另写审计
+   * （契约 §5 审计表无 acknowledge 行，行级归属即审计）。
+   */
+  async acknowledge(
+    user: SessionUser,
+    id: number,
+    payload: AcknowledgePayloadDto,
+  ): Promise<AcknowledgeResultDto> {
+    const row = await this.confirmableRecordOf(id, user);
+    const raw = payload?.alert_ids;
+    if (raw != null && !Array.isArray(raw)) {
+      throw new ApiException('VALIDATION_OUT_OF_RANGE', '知晓确认行格式非法', {
+        missingFields: [ALERT_IDS_BAD_PAYLOAD()],
+      });
+    }
+    const ids = [...new Set((raw ?? []).filter((v): v is number => Number.isInteger(v) && v > 0))];
+    if (ids.length === 0) return { acknowledged: 0 };
+    const result = await this.db
+      .update(alerts)
+      .set({ acknowledgedBy: user.id, acknowledgedAt: localMeasuredAt() })
+      .where(
+        and(
+          eq(alerts.recordId, row.id),
+          inArray(alerts.id, ids),
+          // 幂等：只写未知晓行，首次知晓时刻不被后续重复点击覆盖
+          isNull(alerts.acknowledgedBy),
+        ),
+      );
+    return { acknowledged: result[0].affectedRows ?? 0 };
+  }
+
+  /**
+   * POST /records/{id}/confirm（F2-05 签名归档；409 CONFIRM_INCOMPLETE 见契约 §2）。
+   *
+   * 处理顺序：闸门校验（含接班人本人）→ 签名图解码校验（PNG 魔数 + ≤512KB）→ 落盘 →
+   * 事务内**完整性终校**（F2-04-T1 服务端权威：仍有未知晓标红行 → 409，与转 completed
+   * 同事务防「知晓与归档并发」竞态）→ status=completed + confirmed_at=服务端时刻 +
+   * signature_path → 审计 `record.confirm`（契约 §5）。
+   * 无标红行的单（alerts 空）直接可确认——逐条知晓只约束**存在的**确认行。
+   */
+  async confirm(
+    user: SessionUser,
+    id: number,
+    payload: ConfirmPayloadDto,
+  ): Promise<ConfirmResultDto> {
+    const row = await this.confirmableRecordOf(id, user);
+    const sig = typeof payload?.signature === 'string' ? payload.signature : '';
+    if (sig.trim() === '') {
+      throw new ApiException('VALIDATION_MISSING_FIELDS', '请签名后确认归档', {
+        missingFields: [SIGNATURE_MISSING()],
+      });
+    }
+    const png = decodeSignature(sig);
+    if (!png) {
+      throw new ApiException('VALIDATION_OUT_OF_RANGE', '签名图格式非法（须为 PNG 图片）', {
+        missingFields: [SIGNATURE_BAD_PAYLOAD()],
+      });
+    }
+    if (png.length > SIGNATURE_MAX_BYTES) {
+      throw new ApiException('VALIDATION_OUT_OF_RANGE', '签名图过大，请重新签名', {
+        missingFields: [SIGNATURE_BAD_PAYLOAD()],
+      });
+    }
+    // 先落盘再进事务：路径按 record_no 确定性可重入，事务失败残留文件无副作用（重试覆盖）
+    const signaturePath = await writeSignatureFile(row.recordNo, png);
+    const confirmedAt = localMeasuredAt(); // DATA-09 同口径：服务端收到时刻
+
+    return this.db.transaction(async (tx) => {
+      // 完整性终校（F2-04-T1）：与下方 update 同事务，防知晓与归档并发的中间态入档
+      const open = await tx
+        .select({ id: alerts.id })
+        .from(alerts)
+        .where(and(eq(alerts.recordId, row.id), isNull(alerts.acknowledgedBy)));
+      if (open.length > 0) {
+        throw new ApiException(
+          'CONFIRM_INCOMPLETE',
+          `仍有 ${open.length} 项标红/交接事项未逐条知晓，请先逐条确认`,
+        );
+      }
+      await tx
+        .update(records)
+        .set({ status: 'completed', confirmedAt, signaturePath })
+        .where(eq(records.id, row.id));
+      await tx.insert(auditLogs).values({
+        actorId: user.id,
+        action: 'record.confirm',
+        targetType: 'record',
+        targetId: row.recordNo,
+        newValue: { version: row.version },
+      });
+      return {
+        id: row.id,
+        record_no: row.recordNo,
+        status: 'completed' as const,
+        version: row.version,
+        confirmed_at: confirmedAt,
+        receiver: row.receiverId != null ? { id: row.receiverId, real_name: user.realName } : null,
+        signature_path: signaturePath,
+      } satisfies ConfirmResultDto;
+    });
   }
 
   // ── 提交协议（TK-12：契约 §3.2 preview/submit、§4；F1-10、F2-01、DATA-05/07/09/10/13）─────
