@@ -1,8 +1,10 @@
-import { Body, Controller, Get, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
 import type {
   BackfillPayloadDto,
+  PendingListDto,
   PrevDto,
   PreviewDto,
+  RecordDetailDto,
   SubmitPayloadDto,
   SubmitResultDto,
   TodayDto,
@@ -61,6 +63,24 @@ export class RecordsController {
   }
 
   /**
+   * GET /api/v1/records/pending —— 待确认列表（TK-18，契约 §3.4；F2-02）。
+   *
+   * 取数口径：**我为 receiver 且 status=submitted**（draft/objection/completed 不产生
+   * 待确认入口，D-T18）；响应含逐单标红行数 alert_count，首页据此展示
+   * 「有 N 份交接单待确认」醒目入口（N = items.length）。
+   *
+   * 角色：契约 §3.4 角色列原样 `master`——待确认入口是**接班人**的待办（receiver 恒为
+   * 师傅，排班只覆盖 master），不适用「chief 覆盖师傅端只读接口」的回写口径
+   * （科长巡查历史单走 GET /records/{id} 与 GET /records）。
+   */
+  @Get('pending')
+  @UseGuards(SessionGuard, RolesGuard)
+  @Roles('master')
+  pending(@CurrentUser() user: SessionUser): Promise<PendingListDto> {
+    return this.records.pending(user);
+  }
+
+  /**
    * POST /api/v1/records/today/preview —— 提交前汇总预览（TK-12，F1-10「未填项、异常项一目了然」）。
    *
    * 请求体同 submit（契约 §4），返回未填项与异常项两张清单（结构同契约 §2 missing_fields，
@@ -113,5 +133,25 @@ export class RecordsController {
     @Body() payload: BackfillPayloadDto,
   ): Promise<SubmitResultDto> {
     return this.records.backfill(user, payload);
+  }
+
+  /**
+   * GET /api/v1/records/{id} —— 交接单详情（TK-18，契约 §3.4；F2-03、F5-01）。
+   *
+   * 含全部读数、标红项（alerts，**置顶序**由服务端排好：level high→mid→low、同级按 id，
+   * shared ALERT_LEVEL_RANK 单一权威）、电梯核对明细（联字典回显电梯名）、版本与双方
+   * 确认信息；接班人逐项浏览与科长历史巡查共用同一视图。
+   *
+   * 角色：契约 §3.4 角色列「登录用户」→ master/chief 均可（SessionGuard 已鉴登录态）。
+   * 路由序：`:id` 为动态段，**必须声明在本控制器全部静态路由之后**（Nest 按声明序匹配，
+   * 否则 /records/today、/records/pending 会被吞进 :id）。
+   */
+  @Get(':id')
+  @UseGuards(SessionGuard, RolesGuard)
+  @Roles('master', 'chief')
+  detail(@Param('id') id: string): Promise<RecordDetailDto> {
+    // 手工解析而非 ParseIntPipe：非数字 id 也按契约 §2 统一结构返回 404 NOT_FOUND，
+    // 不走框架默认 400（错误形状与错误码表不一致）
+    return this.records.detail(Number(id));
   }
 }

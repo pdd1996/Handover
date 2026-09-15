@@ -1,7 +1,8 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { and, asc, eq, lt } from 'drizzle-orm';
-import { getTableConfig } from 'drizzle-orm/mysql-core';
+import { and, asc, count, desc, eq, inArray, lt } from 'drizzle-orm';
+import { alias, getTableConfig } from 'drizzle-orm/mysql-core';
 import {
+  ALERT_LEVEL_RANK,
   FIELDS,
   FIELD_BY_NAME,
   FIELD_LENGTHS,
@@ -9,6 +10,10 @@ import {
   SECTION_BY_NO,
   TASK_CARDS,
   USAGE_FIELDS,
+  handoverItemsOf,
+  ELEVATOR_ALERT_LEVEL,
+  HANDOVER_ALERT_LEVEL,
+  STATUS_ALERT_LEVEL,
   buildValidationError,
   clockMinutesOf,
   DECREASED_GUARD_FIELDS,
@@ -37,9 +42,11 @@ import {
   validateFields,
   waterDayUseOf,
   isValidLocalTimestamp,
+  type AlertDto,
   type BackfillPayloadDto,
   type BadgeDto,
   type CardDef,
+  type ElevatorCheckRecordDto,
   type CardDto,
   type CardFieldStateDto,
   type ConfirmationPayload,
@@ -48,9 +55,11 @@ import {
   type MissingField,
   type PrevBackfillField,
   type DecreasedGuardField,
+  type PendingListDto,
   type PrevDto,
   type PrevRecordDto,
   type PreviewDto,
+  type RecordDetailDto,
   type RecordFieldName,
   type RecalcResultDto,
   type SectionNo,
@@ -405,11 +414,26 @@ export class RecordsService {
   }
 
   /**
-   * records 行 → 上一班带出体（dto.ts PrevRecordDto）：readings 仅回传字段字典内的
-   * records 存储列（板块 ≥1）——基础信息列在记录级字段已回显，lo_night_use 等派生列
-   * 非存储列。字典与 schema 漂移时经 recordKeyOf 记错误日志而非静默丢字段。
+   * records 行 → 上一班带出体（dto.ts PrevRecordDto）：readings 取数范围与说明见
+   * readingsOf（TK-18 抽取，与交接单详情共用）。
    */
   private toPrevRecord(row: typeof records.$inferSelect): PrevRecordDto {
+    return {
+      duty_date: row.dutyDate,
+      record_no: row.recordNo,
+      status: row.status,
+      submitted_at: row.submittedAt,
+      version: row.version,
+      readings: this.readingsOf(row),
+    };
+  }
+
+  /**
+   * records 行 → 全部读数映射（TK-18 抽取复用）：字段字典内板块 ≥1 的 records 存储列，
+   * 蛇形列名 → 原值（decimal 为字符串）。消费方：上一班带出（toPrevRecord，TK-07）与
+   * 交接单详情（detail，TK-18）——两处同一取数范围，不得各写一份。
+   */
+  private readingsOf(row: typeof records.$inferSelect): Record<string, unknown> {
     const readings: Record<string, unknown> = {};
     for (const def of FIELDS) {
       if (def.section === 0) continue; // 基础信息（duty_date/submitted_at 等）走记录级字段
@@ -417,13 +441,150 @@ export class RecordsService {
       if (!key) continue;
       readings[def.name] = row[key as keyof typeof row] ?? null;
     }
+    return readings;
+  }
+
+  // ── 交接确认（TK-18：契约 §3.4；F2-02 待确认入口、F2-03 逐项浏览）───────────────────
+
+  /**
+   * GET /records/pending（F2-02「接班人登录首页显示醒目『有 N 份交接单待确认』入口」）。
+   *
+   * 取数口径（契约 §3.4）：**我为 receiver 且 status=submitted**——draft（撤回未重提，
+   * D-T18）与 objection/completed 均不产生待确认入口；`alert_count` 为该单标红确认行数
+   * （alerts，三类来源：状态异常/电梯不一致/交接事项拆条），供列表角标与 N 的展示。
+   * 按 duty_date 降序（最近的待确认单在前）。
+   */
+  async pending(user: SessionUser): Promise<PendingListDto> {
+    const rows = await this.db
+      .select({
+        id: records.id,
+        recordNo: records.recordNo,
+        dutyDate: records.dutyDate,
+        version: records.version,
+        submittedAt: records.submittedAt,
+        submitterId: users.id,
+        submitterName: users.realName,
+      })
+      .from(records)
+      .innerJoin(users, eq(records.submitterId, users.id))
+      .where(and(eq(records.receiverId, user.id), eq(records.status, 'submitted')))
+      .orderBy(desc(records.dutyDate));
+    if (rows.length === 0) return { items: [] };
+
+    // 标红行计数逐单聚合（一次 group by，不 N+1）；无 alerts 的单显示 0
+    const countRows = await this.db
+      .select({ recordId: alerts.recordId, n: count(alerts.id) })
+      .from(alerts)
+      .where(
+        inArray(
+          alerts.recordId,
+          rows.map((r) => r.id),
+        ),
+      )
+      .groupBy(alerts.recordId);
+    const counts = new Map(countRows.map((c) => [c.recordId, Number(c.n)]));
+
     return {
-      duty_date: row.dutyDate,
+      items: rows.map((r) => ({
+        id: r.id,
+        record_no: r.recordNo,
+        duty_date: r.dutyDate,
+        status: 'submitted' as const,
+        version: r.version,
+        submitted_at: r.submittedAt,
+        submitter: { id: r.submitterId, real_name: r.submitterName },
+        alert_count: counts.get(r.id) ?? 0,
+      })),
+    };
+  }
+
+  /**
+   * GET /records/{id}（F2-03 逐项浏览、F5-01 历史详情共用，契约 §3.4「含全部读数、
+   * 标红项（alerts）、电梯核对、版本摘要、双方确认信息」）。
+   *
+   * 角色为登录用户（master/chief 均可，契约 §3.4 角色列「登录用户」）：接班人浏览待确认
+   * 单、科长巡查历史单共用同一详情视图。alerts 返回**置顶序**（level high→mid→low、
+   * 同级按 id 升序，shared ALERT_LEVEL_RANK 单一权威），前端顺序渲染即满足
+   * F2-03-T1「标红项置顶高亮」；elevator_checks 联字典回显电梯名（按落库序）。
+   */
+  async detail(id: number): Promise<RecordDetailDto> {
+    if (!Number.isInteger(id) || id <= 0) {
+      throw new ApiException('NOT_FOUND', '交接单不存在或已被删除');
+    }
+    const submitterU = alias(users, 'submitter_user');
+    const receiverU = alias(users, 'receiver_user');
+    const rows = await this.db
+      .select({
+        row: records,
+        submitterId: submitterU.id,
+        submitterName: submitterU.realName,
+        receiverName: receiverU.realName,
+      })
+      .from(records)
+      .innerJoin(submitterU, eq(records.submitterId, submitterU.id))
+      .leftJoin(receiverU, eq(records.receiverId, receiverU.id))
+      .where(eq(records.id, id))
+      .limit(1);
+    const found = rows[0];
+    if (!found) throw new ApiException('NOT_FOUND', '交接单不存在或已被删除');
+    const row = found.row;
+
+    const [alertRows, checkRows] = await Promise.all([
+      this.db.select().from(alerts).where(eq(alerts.recordId, id)),
+      this.db
+        .select({
+          elevatorId: elevatorChecks.elevatorId,
+          elevatorName: elevators.name,
+          checkTime: elevatorChecks.checkTime,
+          expected: elevatorChecks.expected,
+          actual: elevatorChecks.actual,
+          explanation: elevatorChecks.explanation,
+        })
+        .from(elevatorChecks)
+        .leftJoin(elevators, eq(elevatorChecks.elevatorId, elevators.id))
+        .where(eq(elevatorChecks.recordId, id))
+        .orderBy(asc(elevatorChecks.id)),
+    ]);
+    // 置顶序（F2-03）：shared ALERT_LEVEL_RANK 同一权重表，前端不再各排一套
+    const sortedAlerts: AlertDto[] = [...alertRows]
+      .sort((a, b) => ALERT_LEVEL_RANK[a.level] - ALERT_LEVEL_RANK[b.level] || a.id - b.id)
+      .map((a) => ({
+        id: a.id,
+        rule_key: a.ruleKey,
+        target: a.target,
+        level: a.level,
+        message: a.message,
+        acknowledged_by: a.acknowledgedBy,
+        acknowledged_at: a.acknowledgedAt,
+      }));
+
+    const checks: ElevatorCheckRecordDto[] = checkRows.map((c) => ({
+      elevator_id: c.elevatorId,
+      elevator_name: c.elevatorName,
+      check_time: c.checkTime,
+      expected: c.expected,
+      actual: c.actual,
+      explanation: c.explanation,
+    }));
+
+    return {
+      id: row.id,
       record_no: row.recordNo,
+      duty_date: row.dutyDate,
       status: row.status,
-      submitted_at: row.submittedAt,
       version: row.version,
-      readings,
+      submitted_at: row.submittedAt,
+      submitter: { id: found.submitterId, real_name: found.submitterName },
+      receiver:
+        row.receiverId != null
+          ? { id: row.receiverId, real_name: found.receiverName ?? String(row.receiverId) }
+          : null,
+      receiver_change_reason: row.receiverChangeReason,
+      readings: this.readingsOf(row),
+      alerts: sortedAlerts,
+      elevator_checks: checks,
+      confirmed_at: row.confirmedAt,
+      signature_path: row.signaturePath,
     };
   }
 
@@ -1057,7 +1218,8 @@ export class RecordsService {
    * 409 need_confirm 清单；confirmations 消费口径见下；duty_guard_confirm 仍仅接收，随 TK-26）；
    * ③ 用量固化已随 TK-13 落地（服务端计算 + 覆盖协议，评审修复轮 L1 起在校验与 409 判定之后执行；
    * 上一班取数 = 相邻班次记录行或缺失态补录值，充气确认后的卡按 0 计 D-P14）；
-   * ④ 标红确认行（alerts）随 TK-17/TK-22 落地；⑤ 转 submitted、submitted_at=服务端收到时刻、
+   * ④ 标红确认行（alerts）已随 TK-17（电梯不一致）与 TK-18（状态异常、交接事项拆条）落地；
+   * ⑤ 转 submitted、submitted_at=服务端收到时刻、
    * 生成 record_no；⑥ 写审计（record.submit + record.usage_override + 接班人修改原因留痕）。
    *
    * TK-16 起：提交主体抽为 submitCore（跨班次补交 backfill 同口径复用，dutyDate 由调用方
@@ -1375,10 +1537,50 @@ export class RecordsService {
             recordId,
             ruleKey: 'elevator_mismatch',
             target: `elevator:${c.elevator_id}`,
-            level: 'mid',
+            level: ELEVATOR_ALERT_LEVEL,
             message: message.slice(0, 300),
           });
         }
+      }
+
+      // 状态异常标红行（TK-18，契约 §4 第 4 步「生成标红确认行」的补全，技术方案 §5.3/DEP-08）：
+      // 状态字段=bad 逐字段一行，rule_key/target 形态与种子 D-1 配套标红行同形
+      // （`{field}_bad` / `field:{field}`，shared alerts.ts 单一口径），level=high
+      // （PRD §6.4 预警规则表「状态=异常 → 高」的 Phase 1 标红过渡，DEP-07）；异常备注
+      // 有内容时并入文案（可解释原则：文案含命中规则与现状）。快照语义：上方已整单清空
+      // alerts，撤回/异议重提按本次提交重建，旧标红不残留。
+      for (const def of FIELDS) {
+        if (def.kind !== 'status') continue;
+        const key = recordKeyOf(def.name, this.logger);
+        if (!key || values[key] !== ABNORMAL_STATUS) continue;
+        // 状态字段与异常备注在字典中成对（`*_status` → `*_note`：hp_status→hp_note 等，附录 A）；
+        // 备注缺失不拦（动态必填由校验层保证，此处仅文案取值）
+        const noteKey = recordKeyOf(
+          def.name.replace(/_status$/, '_note') as RecordFieldName,
+          this.logger,
+        );
+        const noteRaw = noteKey ? values[noteKey] : null;
+        const note = typeof noteRaw === 'string' ? noteRaw.trim() : '';
+        await tx.insert(alerts).values({
+          recordId,
+          ruleKey: `${def.name}_bad`,
+          target: `field:${def.name}`,
+          level: STATUS_ALERT_LEVEL,
+          message: `「${def.label}」填写为异常${note ? `：${note}` : ''}`.slice(0, 300),
+        });
+      }
+      // 交接事项拆条（TK-18，DATA-08/技术方案 §5.3「按条拆分——以换行或编号分条」）：
+      // 板块十有内容时拆为多条确认行（拆条纯函数 shared handoverItemsOf，逐条知晓 TK-19），
+      // level=low（提示性质，非异常）
+      const handoverItems = handoverItemsOf(values['handoverNote']);
+      for (const [i, item] of handoverItems.entries()) {
+        await tx.insert(alerts).values({
+          recordId,
+          ruleKey: 'handover_note',
+          target: 'field:handover_note',
+          level: HANDOVER_ALERT_LEVEL,
+          message: `交接事项 ${i + 1}：${item}`.slice(0, 300),
+        });
       }
 
       // 审计（契约 §5：action=record.submit；接班人修改原因记 reason 列，DATA-10 留痕）
