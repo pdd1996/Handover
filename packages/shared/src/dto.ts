@@ -405,6 +405,41 @@ export interface RecordDetailDto {
   signature_path: string | null;
 }
 
+/** POST /records/{id}/acknowledge 请求体（F2-04/DATA-08/DEP-08：逐条"已知晓"，TK-19） */
+export interface AcknowledgePayloadDto {
+  /** 待知晓的标红确认行 id 集合（alerts.id；跨单/不存在的 id 被忽略，容错口径同提交侧 confirmations） */
+  alert_ids: readonly number[];
+}
+
+/** POST /records/{id}/acknowledge 响应体：本次**新写入**知晓标记的行数（已知晓行不重复计数） */
+export interface AcknowledgeResultDto {
+  acknowledged: number;
+}
+
+/** POST /records/{id}/confirm 请求体（F2-05：签名归档，TK-19） */
+export interface ConfirmPayloadDto {
+  /**
+   * 接班人签名图：PNG data URL（h5 签名板 canvas toDataURL 产物）。服务端解码校验
+   * （data:image/png;base64 前缀 + PNG 魔数，≤ 512KB）后落盘，路径记 signature_path。
+   */
+  signature: string;
+}
+
+/** POST /records/{id}/confirm 响应体（F2-05 归档回执；双方姓名/确认时间/签名图经 GET /records/{id} 可查） */
+export interface ConfirmResultDto {
+  id: number;
+  record_no: string;
+  /** 归档后恒 'completed'（技术方案 §5.4 状态机） */
+  status: RecordStatus;
+  version: number;
+  /** 确认归档时刻（服务端收到时刻，DATA-09 同口径） */
+  confirmed_at: string;
+  /** 接班人（=确认签名者；无排班为 null） */
+  receiver: { id: number; real_name: string } | null;
+  /** 签名图路径（静态可查） */
+  signature_path: string;
+}
+
 // ── 契约 §3.3 GET /elevators/expected（电梯逐台预期状态；ELE-03；TK-17/D-T22）─────────
 
 /** 单台电梯的预期状态（打开电梯板块时逐台展示「预期：运行/停运」，ELE-03） */
