@@ -15,6 +15,7 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue';
 import { showToast } from 'vant';
 import {
   CARD_BY_FIELD,
+  CARD_BY_KEY,
   FIELD_BY_NAME,
   FIELD_NAMES,
   buildValidationError,
@@ -23,11 +24,14 @@ import {
   PREV_BACKFILL_FIELDS,
   toMissingField,
   unconfirmedNeedConfirmItems,
+  validateElevatorChecks,
   validateFields,
   validatePrevBackfillReadings,
   type ConfirmItem,
   type ConfirmationPayload,
   type DecreasedGuardField,
+  type ElevatorCheckPayload,
+  type ElevatorExpectedDto,
   type FieldValueGetter,
   type FormOptionsDto,
   type MissingField,
@@ -92,6 +96,31 @@ const prevCache = ref<{ dutyDate: string; dto: PrevDto } | null>(null);
 const configs = ref<FormOptionsDto | null>(null);
 
 /**
+ * 电梯逐台预期状态（TK-17，ELE-03；D-T22 只读计算）：打开电梯板块时拉取（核对时刻 =
+ * 服务端响应 check_time，锁定入草稿）。与 configs 同为渲染辅助数据：拉取失败静默降级——
+ * SectionView 回落草稿快照（`elevator_expected`，随草稿持久化即离线可用），再不行提示
+ * 需联网获取，不阻塞其它卡填写。
+ */
+const elevatorExpected = ref<ElevatorExpectedDto | null>(null);
+
+/** 电梯卡 key（shared cards 字典中 kind='elevator' 的唯一卡；跳转定位与打开监听共用） */
+const ELEVATOR_CARD_KEY =
+  Object.values(CARD_BY_KEY).find((c) => c.kind === 'elevator')?.key ?? 'elevator';
+
+async function loadElevatorExpected(): Promise<void> {
+  try {
+    const dto = await api.elevatorsExpected();
+    elevatorExpected.value = dto;
+    // 预期快照随草稿持久化（D-T18）：离线重开卡仍可展示已拉到的逐台预期；已核对行的
+    // expected/check_time 在草稿核对项内锁定（ELE-05），不受快照刷新影响
+    draft.setValue('elevator_expected', JSON.parse(JSON.stringify(dto)));
+  } catch (err) {
+    // 401 并入单一入口；其余失败保留旧值（若有）——快照仅是展示辅助，不弹错不阻塞
+    handleSessionLoss(err);
+  }
+}
+
+/**
  * 待同步队列（TK-15，F1-06/F1-07）：离线提交的交接单在本机 IndexedDB 排队（服务器零感知，
  * F1-07-T2），恢复网络后自动上传（D-P07 排队送达，顺序即提交顺序）。本 ref 是 UI 展示与
  * 排空引擎的内存镜像，任何队列变动后经 refreshQueue 重读。EVT-04/EVT-05 埋点挂 TK-30。
@@ -154,6 +183,7 @@ function resetSession(): void {
   prevInfo.value = null;
   prevCache.value = null;
   configs.value = null;
+  elevatorExpected.value = null;
   queueItems.value = [];
   syncing.value = false; // M5（评审修复轮）：登出/会话失效打断在途排空，不得残留锁
   sessionEpoch += 1;
@@ -298,6 +328,12 @@ function openCard(key: string): void {
   activeCardKey.value = key;
 }
 
+// 电梯核对（TK-17）：进入电梯卡即拉取逐台预期（核对时刻=响应 check_time，锁定入草稿）。
+// 用 watch 而非在 openCard 内判断：bootstrap 恢复到卡内、返回重开等路径同样触发
+watch(activeCard, (card) => {
+  if (card?.kind === 'elevator') void loadElevatorExpected();
+});
+
 /** 返回首页并重取汇总：TK-06 起填写会改动角标与进度条，返回即需刷新（F1-03「实时汇总」） */
 async function backToToday(): Promise<void> {
   activeCardKey.value = null;
@@ -361,9 +397,21 @@ function buildPayload(): SubmitPayloadDto {
     const v = draft.getValue(`prev_backfill:${f}`);
     if (isFilledValue(v)) prev_readings[f] = v;
   }
+  // 逐台电梯核对（TK-17，D-T22）：草稿核对项随 payload 上送（含锁定的 check_time/expected；
+  // 服务端按 check_time 重算 expected 落库，客户端值仅为展示留痕）。仅上送已核对的行
+  const draftChecks = draft.getValue('elevator_checks');
+  const elevator_checks = Array.isArray(draftChecks)
+    ? (draftChecks as ElevatorCheckPayload[]).filter(
+        (c) =>
+          c != null &&
+          typeof c === 'object' &&
+          typeof (c as ElevatorCheckPayload).actual === 'string',
+      )
+    : [];
   const payload: SubmitPayloadDto = { sections };
   if (usage_overrides.length > 0) payload.usage_overrides = usage_overrides;
   if (Object.keys(prev_readings).length > 0) payload.prev_readings = prev_readings;
+  if (elevator_checks.length > 0) payload.elevator_checks = elevator_checks;
   if (collectedConfirms.value.length > 0) payload.confirmations = collectedConfirms.value;
   return payload;
 }
@@ -391,6 +439,16 @@ function offlinePreviewOf(): PreviewDto {
   // 超长两段不参与：前者控件候选取自 shared 常量无漂移源，后者受 maxlength=200 约束
   const outOfRange = [...result.outOfRange];
   outOfRange.push(...validatePrevBackfillReadings(payload.prev_readings).outOfRange);
+  // 电梯核对（TK-17，D-T22）：不一致未填说明纳入离线预检（shared validateElevatorChecks
+  // 与 api 同一实现；expected 以草稿锁定值兑底——配置离线期被改的极端情形由同步时刻
+  // 服务端复验兜住，滞留单走既有 last_error 链路）。说明缺失即拦入队（ELE-04-T2 同口径，
+  // 否则队列项在同步时刻被 409 拒而滞留，D-T20 M6 同理）
+  const elevatorCheck = validateElevatorChecks(
+    payload.elevator_checks,
+    (id) => payload.elevator_checks?.find((c) => c.elevator_id === id)?.expected ?? null,
+  );
+  missing.push(...elevatorCheck.explanationMissing);
+  outOfRange.push(...elevatorCheck.outOfRange);
   const body = buildValidationError({ missing, outOfRange });
   return {
     duty_date: today.value?.duty_date ?? '',
@@ -597,10 +655,15 @@ async function onOpenPreview(): Promise<void> {
 
 /**
  * 点击预览清单项 → 关弹窗跳到对应卡片并滚动定位到字段（C-09「点击跳转可达」，
- * 字段 → 卡片映射用 shared CARD_BY_FIELD 单一来源；电梯核对行 elevator:{id} 随 TK-17 落地）
+ * 字段 → 卡片映射用 shared CARD_BY_FIELD 单一来源；电梯核对行 `elevator:{id}` 的
+ * 明细不在 CARD_BY_FIELD（records 无对应列）——特判路由到电梯卡，锚点行由 SectionView
+ * 以同一 fieldAnchor 生成，两端必然对齐（TK-17）
  */
 async function jumpFromPreview(item: MissingField): Promise<void> {
-  const cardKey = CARD_BY_FIELD[item.field as keyof typeof CARD_BY_FIELD] ?? null;
+  const cardKey =
+    typeof item.field === 'string' && item.field.startsWith('elevator:')
+      ? ELEVATOR_CARD_KEY
+      : (CARD_BY_FIELD[item.field as keyof typeof CARD_BY_FIELD] ?? null);
   showPreview.value = false;
   if (!cardKey) return;
   activeCardKey.value = cardKey;
@@ -649,12 +712,7 @@ async function onConfirmSubmit(): Promise<void> {
     }
     if (err instanceof ApiRequestError && err.status === 400 && err.body.missing_fields) {
       // 服务端复验拦下（C-09）：把点名清单回填预览弹窗逐条展示，不关窗
-      preview.value = {
-        duty_date: today.value?.duty_date ?? '',
-        missing_fields: err.body.missing_fields,
-        abnormal_fields: preview.value?.abnormal_fields ?? [],
-      };
-      showToast(err.body.message);
+      showServerMissingFields(err);
       return;
     }
     if (err instanceof ApiRequestError && err.status === 409) {
@@ -665,6 +723,13 @@ async function onConfirmSubmit(): Promise<void> {
         showPreview.value = false;
         pendingConfirms.value = items;
         confirmReasons.value = {};
+        return;
+      }
+      // M1（评审修复轮）：电梯说明缺失等 **带 missing_fields 的 409**（契约 §2 同构点名载体）
+      // 与 400 同处理——原实现落进「其余 409」分支，只留一句 toast：逐条点名 + 点击跳转（C-09）
+      // 在电梯场景失效，且 `collectedConfirms` 被清会让本轮已收的防呆确认作废（重提再 409 往返）
+      if (err.body.missing_fields && err.body.missing_fields.length > 0) {
+        showServerMissingFields(err);
         return;
       }
       // 其余 409（当日已提交等）：提示后回首页重取
@@ -678,6 +743,21 @@ async function onConfirmSubmit(): Promise<void> {
   } finally {
     submitting.value = false;
   }
+}
+
+/**
+ * 服务端点名清单回填预览弹窗（C-09「逐条点名 + 点击跳转定位」的客户端兑现，TK-12 400 与
+ * TK-17 评审修复轮 M1 的 409 共用）：**不关弹窗、不清 collectedConfirms、不重取首页**——
+ * 三者任一都会让用户已完成的确认/已看到的定位线索静默丢失。
+ */
+function showServerMissingFields(err: ApiRequestError): void {
+  preview.value = {
+    duty_date: today.value?.duty_date ?? '',
+    missing_fields: err.body.missing_fields ?? [],
+    abnormal_fields: preview.value?.abnormal_fields ?? [],
+  };
+  showPreview.value = true;
+  showToast(err.body.message);
 }
 
 /** 防呆确认项的稳定键（原因收集与重提组装按项对应；gas_refill 无 field，按卡号区分） */
@@ -833,6 +913,7 @@ watch(
     :card="activeCard"
     :prev-info="prevInfo"
     :configs="configs"
+    :elevator-expected="elevatorExpected"
     @back="backToToday"
   />
 

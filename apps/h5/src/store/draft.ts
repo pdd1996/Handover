@@ -23,8 +23,13 @@ import { reactive, ref } from 'vue';
 import type { PrevBackfillField, RecordFieldName } from '@handover/shared';
 import { draftKey, loadDraft, removeDraft, saveDraft, type DraftValues } from './draft-db';
 
-/** 草稿键：字段字典内列名 + 非字典键（覆盖原因 TK-13、补录读数 TK-14，见 draft-db.ts 注） */
-type DraftKey = RecordFieldName | 'usage_override_reason' | `prev_backfill:${PrevBackfillField}`;
+/** 草稿键：字段字典内列名 + 非字典键（覆盖原因 TK-13、补录读数 TK-14、电梯核对 TK-17，见 draft-db.ts 注） */
+type DraftKey =
+  | RecordFieldName
+  | 'usage_override_reason'
+  | `prev_backfill:${PrevBackfillField}`
+  | 'elevator_checks'
+  | 'elevator_expected';
 
 const values = reactive<DraftValues>({});
 

@@ -100,8 +100,18 @@ const liveProgress = computed<BadgeDto>(() => {
   );
 });
 
-/** 分母为 0 的卡（电梯/值班室）是否有任意字段已填（含本地草稿），供角标显示「已填」 */
+/** 分母为 0 的卡（电梯/值班室）是否有任意已填内容（含本地草稿），供角标显示「已填」。
+ * 电梯卡（TK-17）：核对结果不在 fields 字典（明细落 elevator_checks，D-T22）——按草稿
+ * elevator_checks 判定；分母不把核对计入（D-T16 口径为字段维度，改动须先修决策），
+ * 角标维持「待核对/已填」两态而非计数 */
 function anyFilledOf(card: CardDto): boolean {
+  if (card.kind === 'elevator') {
+    const checks = getDraft('elevator_checks');
+    return (
+      Array.isArray(checks) &&
+      checks.some((c) => c != null && typeof (c as { actual?: unknown }).actual === 'string')
+    );
+  }
   return card.fields.some((f) => f.filled || isFilledValue(mergedGet(f.name as never)));
 }
 

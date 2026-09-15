@@ -32,6 +32,7 @@
 import { computed, ref } from 'vue';
 import { showToast } from 'vant';
 import {
+  ELEVATOR_SECTION_NO,
   FIELD_BY_NAME,
   FIELD_LENGTHS,
   fieldAnchor,
@@ -40,17 +41,29 @@ import {
   isDisabledField,
   REQUIRED_WHEN_BOILER_RUN,
   isFilledValue,
+  isMismatchOf,
+  normalizeActualOf,
+  parseWindowsOf,
+  clockMinutesOf,
+  expectedStatusAt,
+  elevatorExpectedLabel,
   prevSourceField,
   measuredAtTarget,
   localMeasuredAt,
   tankRoleOf,
   toMissingField,
+  validateElevatorChecks,
   PREV_BACKFILL_FIELDS,
   waterDayUseOf,
   eDayUseOf,
   gasDayUseOf,
   loDayUseOf,
   type CardDto,
+  type ElevatorActual,
+  type ElevatorCheckPayload,
+  type ElevatorExpectedDto,
+  type ElevatorExpectedItemDto,
+  type ElevatorPlanType,
   type FieldValueGetter,
   type FormOptionsDto,
   type MissingField,
@@ -64,6 +77,8 @@ const props = defineProps<{
   card: CardDto;
   prevInfo: PrevDto | null;
   configs: FormOptionsDto | null;
+  /** 逐台预期状态（TK-17，App 级拉取；null 时回落草稿快照） */
+  elevatorExpected: ElevatorExpectedDto | null;
 }>();
 const emit = defineEmits<{ (e: 'back'): void }>();
 
@@ -435,6 +450,30 @@ const focusedField = ref<string | null>(null);
 
 /** 「完成本卡」（F1-08-T1 的拦截点）：先本地校验，有违规 → 点名面板，禁止直接返回 */
 function onComplete(): void {
+  // 电梯卡预检（TK-17，ELE-04-T2/ELE-07-T1）：与 api 提交侧同一 validateElevatorChecks
+  //（expected 以草稿锁定值兑底，labelOf 带电梯名）——不一致未填说明逐台以 `elevator:{id}`
+  // 点名（C-09 电梯点名形态），点击清单项经锚点跳转定位到对应行
+  if (isElevator.value) {
+    const checks = draftChecksOf();
+    const result = validateElevatorChecks(
+      checks,
+      (id) => checks.find((c) => c.elevator_id === id)?.expected ?? null,
+      (id) => elevatorRows.value.find((r) => r.id === id)?.name ?? null,
+    );
+    const items = [...result.explanationMissing, ...result.outOfRange];
+    if (items.length > 0) {
+      missingFields.value = items;
+      errorMessage.value = '电梯核对未完成：与预期不一致须逐台填写说明';
+      errorFields.value = new Set(items.map((m) => m.field));
+      showToast(errorMessage.value);
+      return;
+    }
+    missingFields.value = null;
+    errorFields.value.clear();
+    showToast('本卡已完成');
+    emit('back');
+    return;
+  }
   const names = props.card.fields.map((f) => f.name as RecordFieldName);
   const body = validateForError(names, get);
   // 用量覆盖原因预检（TK-13，F3-06）：本卡含 lo_day_use 且**本机草稿填了覆盖值**时原因必填——
@@ -475,8 +514,161 @@ function jumpTo(item: MissingField): void {
   window.setTimeout(() => (focusedField.value = null), 1600);
 }
 
-/** 电梯卡无 records 字段：核对明细走 elevator_checks（契约 §3.3，TK-17） */
+// ── 电梯逐台核对（TK-17，ELE-02/03/04/05；D-T22）──────────────────────────────
+
+/** 电梯卡无 records 字段：核对明细走 elevator_checks（契约 §3.3/D-T22） */
 const isElevator = computed(() => props.card.kind === 'elevator');
+
+/** 草稿核对项（`elevator_checks` 数组，随草稿持久化即离线可用，D-T18） */
+function draftChecksOf(): ElevatorCheckPayload[] {
+  const v = draft.getValue('elevator_checks');
+  return Array.isArray(v) ? (v as ElevatorCheckPayload[]) : [];
+}
+
+/**
+ * 展示数据源：实时拉取（props，App 级按打开电梯卡时机刷新）优先，回落草稿快照
+ * `elevator_expected`（随草稿持久化即离线可用，D-T18）；两者皆无 → 空列表提示需联网。
+ */
+const elevatorSnapshot = computed<{
+  check_time: string;
+  elevators: readonly ElevatorExpectedItemDto[];
+} | null>(() => {
+  if (props.elevatorExpected) return props.elevatorExpected;
+  const v = draft.getValue('elevator_expected') as {
+    check_time?: unknown;
+    elevators?: unknown;
+  } | null;
+  if (
+    v &&
+    typeof v.check_time === 'string' &&
+    Array.isArray(v.elevators) &&
+    v.elevators.length > 0
+  ) {
+    return v as { check_time: string; elevators: readonly ElevatorExpectedItemDto[] };
+  }
+  return null;
+});
+
+interface ElevatorRow {
+  id: number;
+  name: string;
+  planText: string;
+  /** 展示用预期：已核对行 = 落笔时锁定的值；未核对行 = 快照生成时刻的值 */
+  expected: 'run' | 'stop';
+  /** 已核对行 = 实际核对（落笔）时刻；未核对行 = 快照生成时刻 */
+  checkTime: string;
+  /** 本地重算预期的依据（快照自带 plan_type/windows；脏数据/旧快照缺字段时 null） */
+  plan: { plan_type: ElevatorPlanType; windows: unknown } | null;
+  /** 草稿已锁定的核对项（actual 已选）；null = 未核对 */
+  check: ElevatorCheckPayload | null;
+  anchor: string;
+}
+
+/** 分钟数 → 'HH:mm'（windows 解析后的展示逆向） */
+function hhmmOf(minutes: number): string {
+  const p = (n: number): string => String(n).padStart(2, '0');
+  return `${p(Math.floor(minutes / 60))}:${p(minutes % 60)}`;
+}
+
+/** 运行计划说明（ELE-02 三选一 + 跨零点窗口原样展示，ELE-09） */
+function planTextOf(e: ElevatorExpectedItemDto): string {
+  if (e.plan_type === 'always') return '24 小时运行';
+  if (e.plan_type === 'stopped') {
+    return `长期停运${e.stop_reason ? `（${e.stop_reason}）` : ''}`;
+  }
+  const wins = parseWindowsOf(e.windows);
+  if (!wins || wins.length === 0) return '按时段运行（时段未配置，预期按 24 小时处理）';
+  return `按时段运行 ${wins.map(([s, t]) => `${hhmmOf(s)}–${hhmmOf(t)}`).join('、')}`;
+}
+
+/**
+ * 逐台行视图：已核对行的 expected/checkTime 取**草稿锁定值**（ELE-05——核对时刻锁定的预期
+ * 不随重开后的新快照翻转）；未核对行随最新快照（新加电梯当日即出现，ELE-08）。
+ * `plan` 随快照项带下（plan_type/windows），供落笔瞬间本地重算预期（M2）。
+ * 行 DOM id 与 C-09 点名锚点同用 fieldAnchor（errors.ts），跳转两端必然对齐。
+ */
+const elevatorRows = computed<ElevatorRow[]>(() => {
+  const snap = elevatorSnapshot.value;
+  if (!snap) return [];
+  const checks = draftChecksOf();
+  return snap.elevators.map((e) => {
+    const locked = checks.find((c) => c.elevator_id === e.id) ?? null;
+    const checked = locked != null && typeof locked.actual === 'string' ? locked : null;
+    const plan =
+      e.plan_type === 'always' || e.plan_type === 'scheduled' || e.plan_type === 'stopped'
+        ? { plan_type: e.plan_type, windows: e.windows }
+        : null;
+    return {
+      id: e.id,
+      name: e.name,
+      planText: planTextOf(e),
+      expected: checked?.expected ?? e.expected,
+      checkTime: checked?.check_time ?? snap.check_time,
+      plan,
+      check: checked,
+      anchor: fieldAnchor(ELEVATOR_SECTION_NO, `elevator:${e.id}`).slice(1),
+    };
+  });
+});
+
+/**
+ * 写核对结果（M2 评审修复轮：**核对时刻 = 点选瞬间的本机时刻，不沿用快照时刻**）。
+ *
+ * 原实现把 `check_time` 取自行上的快照时刻（`snap.check_time`）——离线或页面挂机后重开时，
+ * 那一时刻可能是几小时前，等于**在库里记了一个没发生过的核对时刻**；而服务端又按该时刻
+ * 重算 expected（D-T22 ②），于是深夜核对被算成白天的预期，“该停没停”（ELE-06）静默漏报。
+ * 现按 DATA-13（测量时刻以本机落笔为准）同口径钉时刻，并配套两条：
+ *  ① 预期用**快照自带的运行计划**按新时刻本地重算（shared expectedStatusAt，与服务端同源）——
+ *     因此「与预期一致」不是直接写 match，而是**记录观察到的实际状态**再与当时预期比对；
+ *     快照到落笔之间时段翻转时自然转为不一致并强制说明，不会跟着旧展示悄悄放行；
+ *  ② 无法本地重算预期时（快照缺运行计划的脏数据）**拒记录**——actual='match' 与 expected
+ *     无交叉校验，服务端事后无从察觉，强行记录只会制造漏报。
+ */
+function writeCheck(row: ElevatorRow, chosen: ElevatorActual): void {
+  const stamp = localMeasuredAt();
+  const minutes = clockMinutesOf(stamp.slice(11, 16));
+  const fresh = row.plan && minutes !== null ? expectedStatusAt(row.plan, minutes) : null;
+  if (fresh === null) {
+    showToast(`${row.name}：无法确认运行计划，请联网重开本卡后再核对`);
+    return;
+  }
+  // 「与预期一致」的语义 = 「我看到的与屏幕所示预期相同」→ 观察到的实际状态即展示预期
+  const observed: ElevatorActual = chosen === 'match' ? row.expected : chosen;
+  const actualNorm = normalizeActualOf(observed, fresh);
+  // 时段在「拉取快照 → 落笔」之间翻转（仅对新核对行判：改选已核对行时师傅看的即锁定值）
+  const flipped = !row.check && fresh !== row.expected;
+  const checks = draftChecksOf().filter((c) => c.elevator_id !== row.id);
+  checks.push({
+    elevator_id: row.id,
+    check_time: stamp,
+    expected: fresh,
+    actual: actualNorm,
+    explanation: isMismatchOf(actualNorm) ? String(row.check?.explanation ?? '') : null,
+  });
+  draft.setValue('elevator_checks', checks);
+  errorFields.value.delete(`elevator:${row.id}`);
+  if (flipped) {
+    // C-09 同源不静默：预期翻转必须告知（否则师傅以为刚点的“一致”仍成立）
+    showToast(
+      `${row.name}：预期已随时段变为“${elevatorExpectedLabel(fresh)}”，已按核对时刻重算；` +
+        '若与实际不符请改选并填写说明',
+    );
+  }
+}
+
+function onActualChange(row: ElevatorRow, v: unknown): void {
+  if (v === 'match' || v === 'run' || v === 'stop' || v === 'fault') writeCheck(row, v);
+}
+
+/** 写不一致说明（仅在已选实际状态后出现；清空即回到未填态，预检会重新点名） */
+function writeExplanation(row: ElevatorRow, v: string): void {
+  const checks = draftChecksOf();
+  const entry = checks.find((c) => c.elevator_id === row.id);
+  if (!entry) return;
+  entry.explanation = v;
+  draft.setValue('elevator_checks', [...checks]);
+  errorFields.value.delete(`elevator:${row.id}`);
+}
 
 const headerTitle = computed(() =>
   props.card.slot_label ? `${props.card.title} · ${props.card.slot_label}` : props.card.title,
@@ -509,10 +701,129 @@ const headerTitle = computed(() =>
       </div>
     </div>
 
-    <!-- 电梯卡：核对明细不在 records 字段字典内 -->
-    <div v-if="isElevator" class="mx-3 mt-3">
-      <van-empty description="电梯逐台核对见 TK-17（按核对时刻生成预期状态并锁定，ELE-03/05）" />
+    <!-- C-09 报错点名面板（两卡型共用）：逐条列出缺失/越界字段与电梯核对行，点击跳转定位
+         （F1-08-T1 断言对象；电梯分支由 onComplete 预检以 elevator:{id} 点名，TK-17） -->
+    <div
+      v-if="missingFields && missingFields.length > 0"
+      class="mx-3 mt-3 rounded-xl bg-red-50 p-3"
+      data-testid="section-error-panel"
+      :data-error-count="missingFields.length"
+    >
+      <div class="text-sm font-bold text-red-700" data-testid="error-message">
+        {{ errorMessage }}
+      </div>
+      <div class="mt-0.5 text-xs text-red-500">点击任一项可跳转定位到对应字段</div>
+      <button
+        v-for="item in missingFields"
+        :key="item.field"
+        type="button"
+        class="mt-2 flex w-full items-center justify-between rounded-lg bg-white px-3 py-2 text-left text-sm text-slate-800 active:bg-slate-50"
+        :data-testid="`error-item-${item.field}`"
+        @click="jumpTo(item)"
+      >
+        <span>
+          {{ item.label }}
+          <span class="ml-1 text-xs text-slate-400">板块{{ item.section }}</span>
+        </span>
+        <van-icon name="arrow" class="text-slate-400" />
+      </button>
     </div>
+
+    <!-- 电梯卡：逐台核对（TK-17，ELE-02/03/04/05；D-T22）——明细落 elevator_checks 逐台一行，
+         锚点行 id 与 C-09 点名同用 fieldAnchor（#sec-9-elevator-{id}） -->
+    <template v-if="isElevator">
+      <div
+        v-if="elevatorRows.length === 0"
+        class="mx-3 mt-3 rounded-xl bg-white p-4 text-sm text-slate-500"
+        data-testid="elevator-unavailable"
+      >
+        暂未获取到电梯清单：请检查网络后重开本卡（预期状态需联网按核对时刻生成，ELE-03）。
+      </div>
+      <template v-else>
+        <div
+          class="mx-3 mt-3 rounded-xl bg-white px-4 py-2 text-xs text-slate-500"
+          data-testid="elevator-checktime"
+        >
+          预期快照：{{ elevatorRows[0]?.checkTime }} ·
+          核对时刻在你点选的瞬间自动记录（本机），预期按该时刻重算（ELE-03 / ELE-05）
+        </div>
+        <div class="mx-3 mt-2 divide-y divide-slate-100 overflow-hidden rounded-xl bg-white">
+          <div
+            v-for="row in elevatorRows"
+            :id="row.anchor"
+            :key="row.id"
+            :data-testid="`elevator-row-${row.id}`"
+            :data-elevator-expected="row.expected"
+            class="px-4 py-3"
+            :class="{
+              'field-row-error': errorFields.has(`elevator:${row.id}`),
+              'field-row-focus': focusedField === `elevator:${row.id}`,
+            }"
+          >
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="text-base font-semibold text-slate-800">{{ row.name }}</span>
+              <van-tag
+                :type="row.expected === 'run' ? 'primary' : 'warning'"
+                size="medium"
+                :data-testid="`elevator-expected-${row.id}`"
+              >
+                预期：{{ row.expected === 'run' ? '运行' : '停运' }}
+              </van-tag>
+            </div>
+            <div class="mt-0.5 text-xs text-slate-400">{{ row.planText }}</div>
+            <!-- 已核对行显实际核对（落笔）时刻（ELE-03「系统自动记录」、M2） -->
+            <div
+              v-if="row.check"
+              class="mt-0.5 text-xs text-slate-500"
+              :data-testid="`elevator-checked-at-${row.id}`"
+            >
+              核对于 {{ row.checkTime }}
+            </div>
+            <van-radio-group
+              :model-value="row.check?.actual ?? ''"
+              direction="horizontal"
+              class="mt-2"
+              :data-testid="`elevator-actual-${row.id}`"
+              @update:model-value="(v: unknown) => onActualChange(row, v)"
+            >
+              <van-radio name="match">与预期一致</van-radio>
+              <van-radio :name="row.expected === 'run' ? 'stop' : 'run'">
+                不一致（实际：{{ row.expected === 'run' ? '停运' : '运行' }}）
+              </van-radio>
+              <van-radio name="fault">故障</van-radio>
+            </van-radio-group>
+            <van-field
+              v-if="row.check && isMismatchOf(row.check.actual)"
+              :model-value="String(row.check.explanation ?? '')"
+              type="textarea"
+              autosize
+              rows="1"
+              :maxlength="300"
+              placeholder="与预期不一致须填写说明（ELE-04，随交接单留痕）"
+              class="mt-1 rounded-lg bg-amber-50 px-3"
+              :data-testid="`elevator-explanation-${row.id}`"
+              @update:model-value="(v: string) => writeExplanation(row, v)"
+            />
+          </div>
+        </div>
+        <div class="mx-3 mt-4">
+          <van-button block type="primary" data-testid="complete-card" @click="onComplete">
+            完成本卡
+          </van-button>
+        </div>
+        <div class="mx-4 mt-3 text-xs leading-relaxed text-slate-400">
+          核对结果自动暂存本机，稍候即自动保存（F1-09）；不一致项提交时将生成标红确认行（ELE-06）。
+          <!-- 「已自动保存」指示（F1-09，与表单卡同口径）：落盘点亮，兼 E2E 同步点 -->
+          <span
+            v-if="draftSaved"
+            data-testid="draft-saved"
+            class="block font-bold text-emerald-600"
+          >
+            草稿已自动保存
+          </span>
+        </div>
+      </template>
+    </template>
 
     <template v-else>
       <!-- 上一班带出提示（TK-07）：首班（F1-15）/缺失（F3-07）两态；有上一班记录时无提示、逐字段显比对值 -->
@@ -530,33 +841,6 @@ const headerTitle = computed(() =>
       <!-- 上一班来源日期（TK-07 评审 m5）：显式标出带出源班次，双轨比对与漏交排查可核对 -->
       <div v-if="prevInfo?.prev" class="mx-3 mt-3 text-xs text-slate-400" data-testid="prev-source">
         上一班（{{ prevInfo.prev.duty_date }}）读数供比对
-      </div>
-
-      <!-- C-09 报错点名面板：逐条列出缺失/越界字段，点击跳转定位（F1-08-T1 断言对象） -->
-      <div
-        v-if="missingFields && missingFields.length > 0"
-        class="mx-3 mt-3 rounded-xl bg-red-50 p-3"
-        data-testid="section-error-panel"
-        :data-error-count="missingFields.length"
-      >
-        <div class="text-sm font-bold text-red-700" data-testid="error-message">
-          {{ errorMessage }}
-        </div>
-        <div class="mt-0.5 text-xs text-red-500">点击任一项可跳转定位到对应字段</div>
-        <button
-          v-for="item in missingFields"
-          :key="item.field"
-          type="button"
-          class="mt-2 flex w-full items-center justify-between rounded-lg bg-white px-3 py-2 text-left text-sm text-slate-800 active:bg-slate-50"
-          :data-testid="`error-item-${item.field}`"
-          @click="jumpTo(item)"
-        >
-          <span>
-            {{ item.label }}
-            <span class="ml-1 text-xs text-slate-400">板块{{ item.section }}</span>
-          </span>
-          <van-icon name="arrow" class="text-slate-400" />
-        </button>
       </div>
 
       <!-- 本卡字段表单：行 id = fieldAnchor 锚点，C-09 跳转目标 -->

@@ -11,6 +11,7 @@
  */
 import type {
   ApiError,
+  ElevatorExpectedDto,
   FormOptionsDto,
   PrevDto,
   PreviewDto,
@@ -106,6 +107,14 @@ export const api = {
   /** GET /configs —— 表单选项类配置白名单（DATA-07：hvac_locs 多选 / boiler_list 枚举候选，TK-11） */
   configs(): Promise<FormOptionsDto> {
     return http('/configs');
+  },
+
+  /**
+   * GET /elevators/expected —— 当前时刻逐台预期状态（TK-17，ELE-03；D-T22 只读计算不落库，
+   * 核对结果随提交 payload elevator_checks[] 落库并锁定）。打开电梯板块时拉取。
+   */
+  elevatorsExpected(): Promise<ElevatorExpectedDto> {
+    return http('/elevators/expected');
   },
 
   /** POST /records/today/preview —— 提交前汇总预览（F1-10：未填项/异常项点名清单，TK-12） */

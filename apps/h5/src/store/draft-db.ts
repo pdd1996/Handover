@@ -38,7 +38,12 @@ export const STORE_SYNC_QUEUE = 'sync_queue';
  */
 export type DraftValues = Partial<Record<RecordFieldName, unknown>> & {
   usage_override_reason?: string;
-} & Partial<Record<`prev_backfill:${PrevBackfillField}`, unknown>>;
+} & Partial<Record<`prev_backfill:${PrevBackfillField}`, unknown>> & {
+    // 电梯核对（TK-17，D-T22）：核对结果与预期快照随草稿持久化即离线可用；
+    // 提交时随 payload `elevator_checks[]` 上送（服务端按 check_time 重算 expected 落库）
+    elevator_checks?: unknown;
+    elevator_expected?: unknown;
+  };
 
 /** 草稿键（tombstone 语义的 keying 实现）：按提交人 + 班次起始日隔离 */
 export function draftKey(userId: number, dutyDate: string): string {
