@@ -403,6 +403,12 @@ export interface RecordDetailDto {
   confirmed_at: string | null;
   /** 签名图路径（F2-05；未签名为 null） */
   signature_path: string | null;
+  /**
+   * 历史版本摘要（F2-07-T1「历史版本可查」，TK-20 起）：按版本号降序；
+   * 全字段快照留库（record_versions.snapshot），摘要见 RecordVersionSummaryDto。
+   * 无修改历史（version=1 且未经历异议/撤回）为空数组。
+   */
+  versions: readonly RecordVersionSummaryDto[];
 }
 
 /** POST /records/{id}/acknowledge 请求体（F2-04/DATA-08/DEP-08：逐条"已知晓"，TK-19） */
@@ -438,6 +444,121 @@ export interface ConfirmResultDto {
   receiver: { id: number; real_name: string } | null;
   /** 签名图路径（静态可查） */
   signature_path: string;
+}
+
+// ── 契约 §3.2/§3.4 异议与版本（TK-20；F2-06、F2-07；决策记录 D-T23）─────────────────
+
+/** POST /records/{id}/objection 请求体（F2-06：接班人标注异议退回交班人） */
+export interface ObjectionPayloadDto {
+  /** 异议原因（必填，空白 400 点名；落 records.objection_note，列容量 varchar(500) 超长 400 越界） */
+  note: string;
+}
+
+/** GET /records/mine/objections 的单行（F2-06-T1「退回交班人」：交班人的待处理清单） */
+export interface ObjectionRecordDto {
+  id: number;
+  record_no: string;
+  duty_date: string;
+  /** 恒 'objection'（技术方案 §5.4 状态机：已提交 →（异议）有异议） */
+  status: RecordStatus;
+  version: number;
+  submitted_at: string | null;
+  /** 异议原因（接班人标注时填写，objection_note 原文） */
+  objection_note: string;
+  /** 异议发起时刻（objection_at；24 小时升级计时起点，升级随 TK-22） */
+  objection_at: string;
+  /** 标注异议的接班人（回显姓名，交班人核对「谁退回的」） */
+  receiver: { id: number; real_name: string } | null;
+}
+
+/** GET /records/mine/objections 响应体（按 duty_date 降序） */
+export interface ObjectionListDto {
+  items: readonly ObjectionRecordDto[];
+}
+
+/** POST /records/{id}/objection 响应体（标注回执；交班人侧经 mine/objections 与详情可查） */
+export interface ObjectionResultDto {
+  id: number;
+  record_no: string;
+  /** 标注后恒 'objection'（技术方案 §5.4 状态机） */
+  status: RecordStatus;
+  version: number;
+  objection_note: string;
+  objection_at: string;
+}
+
+/**
+ * PUT /records/{id} 请求体（F2-07：异议单修改，决策记录 D-T23 拍板）。
+ *
+ * `sections` 为**部分合并语义**：仅上送的字段被写入（异议修改场景是「改值」，
+ * 未上送的字段保持原值——与提交协议的「全量快照」语义不同，故不复用 SubmitPayloadDto）。
+ * 字段级形状校验（枚举/数值/长度/停机清列）与 submit 同一 normalizeSections；
+ * **必填完整性不在此校验**（允许分次修改，完整性在 resubmit 把关——契约「重新走提交校验与计算」）。
+ * 用量列（*_use）不接受修改：重提时服务端重算固化（契约 §4 第 3 步同源）。
+ */
+export interface RecordUpdatePayloadDto {
+  sections: Readonly<Partial<Record<RecordFieldName, unknown>>>;
+}
+
+/** PUT /records/{id} 响应体（修改回执；快照/变更明细经 GET /records/{id} 的 versions 可查） */
+export interface RecordUpdateResultDto {
+  id: number;
+  record_no: string;
+  /** 修改不改变状态：仍 'objection'，重提才转回 submitted（D-T23） */
+  status: RecordStatus;
+  /** 修改不改版本号：version+1 只发生在 resubmit（契约 §3.2「版本+1」挂 resubmit 行） */
+  version: number;
+  /** 本次落库的变更字段（字段字典名，相对本版本首改前基线；快照行首改定格） */
+  changed: readonly string[];
+}
+
+/**
+ * POST /records/{id}/resubmit 请求体（F2-07：异议修改后重提，D-T23 拍板）。
+ *
+ * 表单值**不上送**——以 PUT 已写入行的值为准（重提从行上读数重走校验/防呆/计算，
+ * 与 submit 消费同一套函数，防两套口径）；本请求体只携带需交互补收的两类协议项，
+ * 均可选（防呆 409 确认重提与用量覆盖协议，消费口径与 §4 完全相同）。
+ * 不收 `prev_readings`：补录属原始提交语境，重提以上一班行或原提交补录审计为基线。
+ */
+export interface ResubmitPayloadDto {
+  /** 防呆确认（TK-14 消费口径同 submit：409 need_confirm 弹窗收集后随重提上送） */
+  confirmations?: readonly ConfirmationPayload[];
+  /** 用量手工覆盖（TK-13 消费口径同 submit：reason 必填，覆盖值固化并写审计） */
+  usage_overrides?: readonly UsageOverridePayload[];
+}
+
+/** POST /records/{id}/resubmit 响应体（重提回执；PRD 附录 A：重新提交即更新交接时间） */
+export interface ResubmitResultDto {
+  id: number;
+  record_no: string;
+  /** 重提后恒 'submitted'（技术方案 §5.4 状态机：有异议 →（修改重提，版本+1）已提交） */
+  status: RecordStatus;
+  /** 原版本 + 1（历史版本经 record_versions 保留，GET /records/{id} versions 可查） */
+  version: number;
+  /** 重提时刻 = 服务端收到时刻（DATA-09 同口径；覆盖原 submitted_at） */
+  submitted_at: string;
+  /**
+   * 下游重算结果（TK-16 挂账闭环：异议修改触发重算复用 recalcDownstream，D-T21）：
+   * 仅紧邻 D+1 且 status='submitted' 的下游单、water/e/gas 三项、手工覆盖豁免（D-T07）、
+   * 数值判等无变化不写审计（M1）。无变更且无待复核项时为 null。
+   */
+  recalc?: RecalcResultDto | null;
+}
+
+/**
+ * 单条历史版本摘要（GET /records/{id} 的 versions，F2-07-T1「历史版本可查」）：
+ * record_versions 行的查询面——全字段快照留在库内（snapshot 列）不入响应，
+ * 摘要携带版本号/修改人/时刻与变更字段旧值新值（F2-07-T1 判据四要素的后三者）。
+ */
+export interface RecordVersionSummaryDto {
+  /** 被替换的版本号（UNIQUE(record_id, version)；当前 version 恒大于全部摘要行） */
+  version: number;
+  /** 修改人（editor_id 联 users 回显；账号被删为 null） */
+  editor: { id: number; real_name: string } | null;
+  /** 修改时刻（record_versions.edited_at） */
+  edited_at: string;
+  /** 变更字段：字段字典名 → { 旧值, 新值 }（快照基线 vs 修改后） */
+  changed: Record<string, { old: unknown; new: unknown }>;
 }
 
 // ── 契约 §3.3 GET /elevators/expected（电梯逐台预期状态；ELE-03；TK-17/D-T22）─────────
