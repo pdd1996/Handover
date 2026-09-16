@@ -1,0 +1,86 @@
+/**
+ * 科长后台接口客户端（TK-23）—— 契约 §1 基础路径 `/api/v1`；开发期由 vite proxy 转发到
+ * NestJS（:3000），生产由 Nginx 同源反代（技术方案 §2 部署）。
+ *
+ * 认证走 **HttpOnly Cookie 通道**（契约 §1、决策记录 D-T13，与师傅端 h5 同一口径）：
+ * `credentials: 'include'` 让浏览器带上 `handover_sid`，前端代码接触不到令牌。
+ * 响应类型取自 `@handover/shared`（与 api 端同一份契约类型，不另写 interface）。
+ */
+import type { ApiError, MissingSubmitListDto, UserRole } from '@handover/shared';
+
+const BASE = '/api/v1';
+
+/** 当前登录用户（契约 §3.1 GET /auth/me 的返回形状） */
+export interface AuthUser {
+  id: number;
+  real_name: string;
+  role: UserRole;
+}
+
+/**
+ * 服务端按契约 §2 返回的业务错误（C-09：所有 4xx 同一形状）。
+ * 科长后台典型场景：master 误登后台时数据接口 403 FORBIDDEN（TK-23 chief 守卫）。
+ */
+export class ApiRequestError extends Error {
+  constructor(
+    readonly status: number,
+    readonly body: ApiError,
+  ) {
+    super(body?.message ?? `请求失败（HTTP ${status}）`);
+    this.name = 'ApiRequestError';
+  }
+}
+
+/** 网络层失败（服务不可达）——与业务错误严格区分，调用方据此分流（同 h5 评审 M5 口径） */
+export class NetworkError extends Error {
+  constructor(readonly cause?: unknown) {
+    super('网络不可用，请检查院内网络连接');
+    this.name = 'NetworkError';
+  }
+}
+
+async function http<T>(path: string, init?: RequestInit): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}${path}`, {
+      credentials: 'include',
+      ...init,
+      headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
+    });
+  } catch (cause) {
+    throw new NetworkError(cause);
+  }
+
+  const text = await res.text();
+  const body = text === '' ? null : (JSON.parse(text) as unknown);
+  if (!res.ok) throw new ApiRequestError(res.status, body as ApiError);
+  return body as T;
+}
+
+export const api = {
+  /** POST /auth/login —— cookie 通道，响应体不含令牌（契约 §3.1）；登录事件服务端记审计（C-05） */
+  login(username: string, password: string): Promise<{ user: AuthUser }> {
+    return http('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ username, password }),
+    });
+  },
+
+  /** POST /auth/logout —— 删除会话存根，服务端亦不再认可该令牌 */
+  logout(): Promise<{ ok: true }> {
+    return http('/auth/logout', { method: 'POST' });
+  },
+
+  /** GET /auth/me —— 刷新页面后恢复登录态；role ≠ chief 由调用方拒绝进入后台（C-05） */
+  me(): Promise<AuthUser> {
+    return http('/auth/me');
+  },
+
+  /**
+   * GET /admin/missing-submits —— 应提交未提交视图（F6-06 后台半边，契约 §3.6，TK-23）：
+   * 日期 + 排班人，数据源与 missing_submit 站内通知同源；duty_date 倒序。
+   */
+  missingSubmits(): Promise<MissingSubmitListDto> {
+    return http('/admin/missing-submits');
+  },
+};
