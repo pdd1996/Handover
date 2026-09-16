@@ -97,3 +97,13 @@ export function shiftDutyDate(now: Date, shiftStart: string): string {
   const { date, minutes } = localParts(now, SHIFT_TIMEZONE);
   return minutes < parseClock(shiftStart, DEFAULT_SHIFT_START) ? minusOneDay(date) : date;
 }
+
+/**
+ * now 在 SHIFT_TIMEZONE 的当地墙钟（日历日 + 当日分钟数）。
+ * 导出供定时任务（TK-22 F6-06 漏交扫描）做「截止时点已过否」的**墙钟空间**比较——
+ * 截止时点 =（duty_date + 1 天）的 'HH:MM'，两端都在日历空间对表，无需反推 Date，
+ * 不引入第二个时区换算实现（同班次分界口径的防漂移纪律）。
+ */
+export function localWallClock(now: Date): { date: string; minutes: number } {
+  return localParts(now, SHIFT_TIMEZONE);
+}
