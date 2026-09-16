@@ -31,6 +31,7 @@ import {
   expectedStatusAt,
   loDayUseOf,
   localMeasuredAt,
+  localTimestampToDate,
   numericMaxOf,
   parseNumeric,
   refillCardsOf,
@@ -84,6 +85,8 @@ import {
   type ResubmitResultDto,
   type UsageFieldName,
   type UsageOverridePayload,
+  type WithdrawNotAllowedReason,
+  type WithdrawResultDto,
 } from '@handover/shared';
 import type { SessionUser } from '../auth/auth.service';
 import { ApiException } from '../common/api-error';
@@ -120,6 +123,16 @@ function calendarDateOf(s: string): string {
   const t = new Date(`${s}T00:00:00Z`);
   return Number.isNaN(t.getTime()) ? '' : t.toISOString().slice(0, 10);
 }
+
+/**
+ * 撤回窗口回落值（TK-21，F2-08）：configs `withdraw_window_minutes` 非法/缺失时回落。
+ * 与种子值同源（《开发种子数据》§五 `withdraw_window_minutes=10`，D-P05 拍板 10 分钟）；
+ * 值本身 ❓ 待科长确认（台账待确认清单），运营口径后台可配（F4-11）。
+ */
+const DEFAULT_WITHDRAW_WINDOW_MINUTES = 10;
+
+// 本地时间戳解析（submitted_at → Date，撤回窗口判定用）已上移 shared `calc.ts localTimestampToDate`
+// （api 与 h5 倒计时同一解析，三端同源纪律，勿各写一份）。
 
 /** 状态类字段取此值即为"异常"（PRD §6.2：Phase 1 无独立预警，"预警项"指表单级标红项；与 cards.ts STATUS_BAD 同口径） */
 const ABNORMAL_STATUS = 'bad';
@@ -446,12 +459,28 @@ export class RecordsService {
     return Number.isInteger(n) && n >= 1 && n <= 365 ? n : DEFAULT_BACKFILL_WINDOW_DAYS;
   }
 
+  /**
+   * 撤回窗口分钟数（TK-21，F2-08/F2-09）：configs `withdraw_window_minutes`，非法/缺失
+   * 回落 DEFAULT_WITHDRAW_WINDOW_MINUTES（10，与种子同源）——取值方式与 backfillWindowDays
+   * 同构（运营口径后台可配，F4-11；❓ 待科长确认）。限幅 1–1440（≤1 天）防配置错字
+   * 把窗口关零或开到无限。**today() 回传与 withdraw() 校验共用本方法**，两端同源不漂移。
+   */
+  async withdrawWindowMinutes(): Promise<number> {
+    const rows = await this.db
+      .select({ value: configs.configValue })
+      .from(configs)
+      .where(eq(configs.configKey, 'withdraw_window_minutes'))
+      .limit(1);
+    const n = Number((rows[0]?.value ?? '').trim());
+    return Number.isInteger(n) && n >= 1 && n <= 1440 ? n : DEFAULT_WITHDRAW_WINDOW_MINUTES;
+  }
+
   /** GET /records/today 的完整响应 */
   async today(user: SessionUser, now: Date = new Date()): Promise<TodayDto> {
     const { dutyDate, shiftStart } = await this.resolveDutyDate(now);
 
     // 三路并发取数：当日记录、点位字典（卡片由它驱动）、次日排班（接班人带出，F2-01/DATA-10）
-    const [recordRows, spotRows, scheduled] = await Promise.all([
+    const [recordRows, spotRows, scheduled, withdrawWindow] = await Promise.all([
       this.db
         .select({
           id: records.id,
@@ -470,6 +499,7 @@ export class RecordsService {
         .where(eq(spots.status, 'active'))
         .orderBy(asc(spots.sortNo)),
       this.scheduledReceiverOf(dutyDate),
+      this.withdrawWindowMinutes(),
     ]);
 
     const recordRow = recordRows[0]?.row;
@@ -484,6 +514,7 @@ export class RecordsService {
     return {
       duty_date: dutyDate,
       shift_start_time: shiftStart,
+      withdraw_window_minutes: withdrawWindow,
       // F1-01：一天一条记录——duty_date UNIQUE 约束保证至多一行，接口按班次日期查故无重复入口
       record: recordRows[0]
         ? {
@@ -1357,6 +1388,129 @@ export class RecordsService {
       submitted_at: submittedAt,
       recalc,
     } satisfies ResubmitResultDto;
+  }
+
+  // ── 撤回窗口（TK-21：契约 §3.2；F2-08、F2-09、F2-10；决策记录 D-P05）────────────
+
+  /**
+   * 撤回闸门（POST /records/today/withdraw 专用，与 objectionMarkableRecordOf 同构）：
+   * 按当前班次日期（C-08）定位记录（duty_date UNIQUE → 至多一行）——
+   * - 404 NOT_FOUND：当前班次无记录（无可撤回的单）；
+   * - 403 FORBIDDEN：登录人非该单交班人——撤回是交班人的单方纠错动作（D-P05），
+   *   他人代撤会弱化责任归属；chief 由角色守卫拦外（契约 §3.2 角色列 master）。
+   * 状态机判定（三不可撤条件 + draft 重复撤回）在 withdraw() 行锁内做，闸门只管归属与存在性。
+   */
+  private async withdrawableRecordOf(
+    user: SessionUser,
+    dutyDate: string,
+  ): Promise<typeof records.$inferSelect> {
+    const rows = await this.db
+      .select()
+      .from(records)
+      .where(eq(records.dutyDate, dutyDate))
+      .limit(1);
+    const row = rows[0];
+    if (!row) throw new ApiException('NOT_FOUND', '当前班次无交接单可撤回');
+    if (row.submitterId !== user.id) {
+      throw new ApiException('FORBIDDEN', '仅交班人本人可撤回本班次交接单');
+    }
+    return row;
+  }
+
+  /**
+   * POST /records/today/withdraw（F2-08/F2-09/F2-10，D-P05 拍板：提交后 10 分钟内且接班人
+   * 未确认，交班人可单方撤回重改）：
+   * - 三不可撤条件（F2-10，服务端权威校验，行锁下判定）：接班人已确认（completed）→
+   *   ALREADY_CONFIRMED；处于有异议（objection）→ IN_OBJECTION；超窗口（submitted 但
+   *   now − submitted_at > withdraw_window_minutes）→ WINDOW_EXPIRED——均 409 WITHDRAW_NOT_ALLOWED
+   *   携 reason（契约 §2），提示走异议流程；
+   * - draft（已撤回或从未提交，D-T18：draft 仅由撤回产生）→ 409 CONFIRM_INCOMPLETE 同族（无「撤回」语义）；
+   * - 成功：转 draft + 清 submitted_at（回到可编辑，F2-08）、version 不变（重提才 +1，F2-08-T2）、
+   *   读数列保留（师傅继续改）；提交时生成的 alerts/elevator_checks 同事务清空（快照语义，
+   *   与 submitCore 重提先清后插同源；draft 单不带标红/核对明细）；接班人端待确认入口随
+   *   status 转 draft 同步消失（F2-09-T2，pending 取数口径 status='submitted'）；
+   * - 审计 record.withdraw（契约 §5「谁、何时」：actor_id=谁、created_at=何时；old_value 记
+   *   submitted 起点与提交时刻、new_value 记 draft 归宿）。
+   * 行锁串行化：撤回与接班人确认/标注异议并发时，必有一方在锁上看到对方提交后的状态
+   * （确认已落库→撤回撞 ALREADY_CONFIRMED；撤回已转 draft→确认/异议撞各自的状态闸）。
+   */
+  async withdraw(user: SessionUser, now: Date = new Date()): Promise<WithdrawResultDto> {
+    const { dutyDate } = await this.resolveDutyDate(now);
+    const row = await this.withdrawableRecordOf(user, dutyDate);
+    const windowMinutes = await this.withdrawWindowMinutes();
+
+    return this.db.transaction(async (tx) => {
+      const locked = await tx
+        .select()
+        .from(records)
+        .where(eq(records.id, row.id))
+        .limit(1)
+        .for('update');
+      const current = locked[0];
+      if (!current) throw new ApiException('NOT_FOUND', '当前班次无交接单可撤回');
+
+      // 三不可撤条件（F2-10）：状态锁定（已确认/有异议）先于窗口判定——锁定后窗口再长也不可撤，
+      // 先报状态因由更贴责任语义（D-P06「确认是责任界定的锚点」）
+      if (current.status === 'completed') {
+        throw new ApiException(
+          'WITHDRAW_NOT_ALLOWED',
+          '接班人已完成确认，交接单已锁定，请联系接班人走异议流程',
+          { reason: 'ALREADY_CONFIRMED' satisfies WithdrawNotAllowedReason },
+        );
+      }
+      if (current.status === 'objection') {
+        throw new ApiException(
+          'WITHDRAW_NOT_ALLOWED',
+          '交接单处于有异议状态，不可撤回，请走异议修改流程',
+          { reason: 'IN_OBJECTION' satisfies WithdrawNotAllowedReason },
+        );
+      }
+      if (current.status === 'draft') {
+        // 已撤回（draft 仅由撤回产生，D-T18）或从未提交：无「撤回」语义，同族 409 文案区分
+        throw new ApiException('CONFIRM_INCOMPLETE', '交接单尚未提交或已撤回，无法再次撤回');
+      }
+      // status === 'submitted'：校验撤回窗口（F2-08「10 分钟内」/F2-10-T1「超窗口拒绝」）。
+      // submitted_at 缺失（理论不应存在）按无法核实→保守拒绝（WINDOW_EXPIRED）
+      const submittedDate = localTimestampToDate(current.submittedAt ?? '');
+      const elapsedMinutes =
+        submittedDate === null ? Infinity : (now.getTime() - submittedDate.getTime()) / 60000;
+      if (elapsedMinutes > windowMinutes) {
+        throw new ApiException(
+          'WITHDRAW_NOT_ALLOWED',
+          `已超过 ${windowMinutes} 分钟撤回窗口，请联系接班人走异议流程`,
+          { reason: 'WINDOW_EXPIRED' satisfies WithdrawNotAllowedReason },
+        );
+      }
+
+      // 撤回：转 draft + 清 submitted_at（回到可编辑，F2-08）；version 不变（重提才 +1）；读数列保留。
+      // alerts/elevator_checks 同事务清空（快照语义，与 submitCore 重提先清后插同源）
+      await tx
+        .update(records)
+        .set({ status: 'draft', submittedAt: null })
+        .where(eq(records.id, current.id));
+      await tx.delete(alerts).where(eq(alerts.recordId, current.id));
+      await tx.delete(elevatorChecks).where(eq(elevatorChecks.recordId, current.id));
+      // 撤回留痕（契约 §5 record.withdraw「谁、何时」：actor_id=谁、created_at=何时自动）
+      await tx.insert(auditLogs).values({
+        actorId: user.id,
+        action: 'record.withdraw',
+        targetType: 'record',
+        targetId: current.recordNo,
+        oldValue: {
+          status: 'submitted',
+          version: current.version,
+          submitted_at: current.submittedAt,
+        },
+        newValue: { status: 'draft', version: current.version },
+      });
+
+      return {
+        id: current.id,
+        record_no: current.recordNo,
+        status: 'draft' as const,
+        version: current.version,
+      } satisfies WithdrawResultDto;
+    });
   }
 
   /**

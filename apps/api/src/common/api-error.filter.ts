@@ -59,6 +59,7 @@ export class ApiErrorFilter implements ExceptionFilter {
       message: '服务器内部错误',
       missing_fields: null,
       need_confirm: null,
+      reason: null,
       request_id: requestId,
     };
     res.status(HttpStatus.INTERNAL_SERVER_ERROR).json(body);
@@ -72,6 +73,7 @@ export class ApiErrorFilter implements ExceptionFilter {
         message: '资源不存在或无权查看',
         missing_fields: null,
         need_confirm: null,
+        reason: null,
         request_id: requestId,
       };
     }
@@ -80,6 +82,7 @@ export class ApiErrorFilter implements ExceptionFilter {
       message: `请求被拒绝（HTTP ${status}）`,
       missing_fields: null,
       need_confirm: null,
+      reason: null,
       request_id: requestId,
     };
   }

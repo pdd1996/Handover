@@ -19,6 +19,7 @@ import type {
   SubmitPayloadDto,
   SubmitResultDto,
   TodayDto,
+  WithdrawResultDto,
 } from '@handover/shared';
 import { CurrentUser, Roles } from '../auth/decorators';
 import { RolesGuard } from '../auth/roles.guard';
@@ -138,6 +139,23 @@ export class RecordsController {
     @Body() payload: SubmitPayloadDto,
   ): Promise<SubmitResultDto> {
     return this.records.submit(user, payload);
+  }
+
+  /**
+   * POST /api/v1/records/today/withdraw —— 撤回（TK-21，契约 §3.2；F2-08/F2-09/F2-10）。
+   *
+   * 交班人提交后 10 分钟内且接班人未确认，可单方撤回本班次交接单回到可编辑（D-P05）；
+   * 服务端按当前班次日期（C-08）+ submitter=登录人定位，行锁下校三不可撤条件（超窗口/
+   * 已确认/有异议→ 409 WITHDRAW_NOT_ALLOWED 携 reason）；成功转 draft + 清 submitted_at + 同事务
+   * 清 alerts/elevator_checks + 审计 record.withdraw；接班人端待确认入口随 status 转 draft 同步消失。
+   * 角色：`master`（撤回是交班人单方纠错动作，同 submit 写链路口径，不适用 chief 只读回写）。
+   * 路由序：静态段 `today/withdraw`，声明在全部 `:id/xxx` 动态路由之前（同 today/submit 防吞并）。
+   */
+  @Post('today/withdraw')
+  @UseGuards(SessionGuard, RolesGuard)
+  @Roles('master')
+  withdraw(@CurrentUser() user: SessionUser): Promise<WithdrawResultDto> {
+    return this.records.withdraw(user);
   }
 
   /**

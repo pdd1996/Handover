@@ -5,6 +5,7 @@ import {
   type ErrorCode,
   type MissingField,
   type NeedConfirm,
+  type WithdrawNotAllowedReason,
 } from '@handover/shared';
 
 export interface ApiExceptionOptions {
@@ -12,6 +13,8 @@ export interface ApiExceptionOptions {
   missingFields?: MissingField[] | null;
   /** 防呆/安全阀待确认清单（契约 §4）；否则 null */
   needConfirm?: NeedConfirm;
+  /** 不可撤回原因（TK-21/F2-10）：仅 WITHDRAW_NOT_ALLOWED 使用，其余错误码留空即 null */
+  reason?: WithdrawNotAllowedReason | null;
 }
 
 /**
@@ -24,12 +27,14 @@ export class ApiException extends HttpException {
   readonly code: ErrorCode;
   readonly missingFields: MissingField[] | null;
   readonly needConfirm: NeedConfirm;
+  readonly reason: WithdrawNotAllowedReason | null;
 
   constructor(code: ErrorCode, message: string, options: ApiExceptionOptions = {}) {
     super(message, ERROR_HTTP_STATUS[code]);
     this.code = code;
     this.missingFields = options.missingFields ?? null;
     this.needConfirm = options.needConfirm ?? null;
+    this.reason = options.reason ?? null;
   }
 
   /** 组装契约 §2 响应体（request_id 由 ApiErrorFilter 注入） */
@@ -39,6 +44,7 @@ export class ApiException extends HttpException {
       message: this.message,
       missing_fields: this.missingFields,
       need_confirm: this.needConfirm,
+      reason: this.reason,
       request_id: requestId,
     };
   }
