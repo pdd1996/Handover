@@ -651,3 +651,39 @@ export interface PrevDto {
    */
   prev: PrevRecordDto | null;
 }
+
+// ── 契约 §3.5 GET /notifications、POST /notifications/{id}/read（站内通知；DEP-04、F2-11、F2-12、F6-06；TK-22）─────────
+
+/** 站内通知 kind（契约 §3.5；alert_push 属 P2 预警、monitor 属监控，TK-22 仅产生前三类） */
+export const NOTIFICATION_KINDS = [
+  'confirm_due',
+  'objection_escalated',
+  'missing_submit',
+  'alert_push',
+  'monitor',
+] as const;
+export type NotificationKind = (typeof NOTIFICATION_KINDS)[number];
+
+/** 站内通知单行（notifications 表行；read_at 非空即已读） */
+export interface NotificationDto {
+  id: number;
+  kind: NotificationKind;
+  title: string;
+  message: string | null;
+  /** 关联交接单（confirm_due / objection_escalated 携带；missing_submit 无单为 null，日期在 title 内） */
+  record_id: number | null;
+  created_at: string;
+  read_at: string | null;
+}
+
+/** GET /notifications 响应体：当前登录人的未读通知（id 倒序）+ 未读总数（未读角标数据源，DEP-04） */
+export interface NotificationListDto {
+  items: readonly NotificationDto[];
+  unread: number;
+}
+
+/** POST /notifications/{id}/read 响应体（幂等：已读重复调用回首次时刻） */
+export interface NotificationReadResultDto {
+  id: number;
+  read_at: string;
+}
