@@ -95,7 +95,7 @@
 └─────────────────────────────────────────────────────────────┘
 ```
 
-后端服务内部模块划分（NestJS Module）：认证与账号、排班、交接记录（含状态机）、用量计算、预警规则、电梯字典与核对、配置中心、附件、审计、报表导出。
+后端服务内部模块划分（NestJS Module）：认证与账号、排班、交接记录（含状态机）、用量计算、预警规则、电梯字典与核对、配置中心、附件、审计、报表导出（**管理后台 admin 模块已随 TK-23 落地**：契约 §3.6 科长路由统一类级 chief 守卫（SessionGuard + RolesGuard + `@Roles('chief')`），首条落地 GET /admin/missing-submits；科长后台前端 apps/admin 同步立骨架——登录 / 会话恢复 / 无权限页 / 四页导航（记录管理、人员与排班、配置中心、审计日志），业务内容随 TK-24~29 逐页填充）。
 
 ---
 
@@ -448,3 +448,5 @@ PRD v0.2.5 中全部 Given/When/Then 验收标准（含撤回窗口、排班安�
 *本文档 v0.1 已获总务科确认，v0.2 为数据库设计评审修订、待复核。与 PRD 一样：只保留最新版，修订史内嵌本节。*
 
 28. **定时任务四件落地口径（2026-09-16）**：TK-22 实现服务端定时任务（F2-11/F2-12/F6-06 + 会话清理）——§5.4 末新增「实现落点（TK-22）」段（四扫描的时间注入设计、间隔、去重键、F6-06 墙钟空间截止判定与补交窗口对齐的扫描窗口、sessions UTC 串与 records 本地墙钟串两套口径各随其列）；§5.4 异议升级句的「定时任务扫描，升级后记 escalated_at 防重复提醒」自此有实现对应（escalated_at 原子闸门）；§2 选型表的「官方定时任务」落为 @nestjs/schedule（ScheduleModule.forRoot()，notifications.scheduler.ts 按 5/30/30/60 分钟喂系统时钟，jest 环境静默）。无表结构变更（notifications/sessions 两表 §4.2 已有），无新增配置键（confirm_due_hours / objection_escalate_hours / missing_submit_deadline / session_timeout_minutes 种子已有）。联动：契约订正 26、台账增补 #36、任务分解修订 39。
+
+29. **管理后台框架与权限落地口径（2026-09-16）**：TK-23（M4 起步）——① §3 模块划分补管理后台落点（见上文标注）：apps/api 新增 admin 模块（契约 §3.6 科长路由统一入口），守卫**类级**标注 SessionGuard + RolesGuard + `@Roles('chief')`，师傅访问 /admin 一律 403 FORBIDDEN（未登录 401 先于角色判定）；首条落地路由 GET /admin/missing-submits（F6-06 后台视图半边），漏交判定复用 NotificationsService.missingSubmitShifts 单一实现（与 missing_submit 通知同源，契约 §3.6「数据源一致」由此结构保证）；admin.spec 路由完备性哨兵（已注册 /admin 路由逐字对账契约清单）使「一律 403」随 TK-24~29 新增路由自动执法。② 科长后台前端 apps/admin 骨架：不引 vue-router（与 h5 同款组件状态切换）、Element Plus PC 布局（侧边四页导航 + 顶栏用户区）、Cookie 通道登录（C-05 实名制，登录事件记审计随 TK-04 既有口径）、GET /auth/me 会话恢复、role ≠ chief 拦截至无权限页、401 会话失效单一入口 handleSessionLoss；E2E 新增 desktop-admin 项目（Desktop Chrome :5174）。无表结构变更、无新增配置键。测试：jest 全量 228/228（重灌种子，含 admin.spec 8 项）、E2E 全量 58/58（E2E_CHANNEL=chrome，含 admin-shell 3 项）。联动：契约订正 27、台账增补 #37、任务分解修订 40。
