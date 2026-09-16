@@ -36,9 +36,21 @@ export default defineConfig({
   },
   projects: [
     {
-      // PRD §7 技术约束「移动端优先」：以真机尺寸跑，而非桌面视口
+      // PRD §7 技术约束「移动端优先」：以真机尺寸跑，而非桌面视口。
+      // admin-*  spec 属科长后台（desktop-admin 项目），不进移动端跑法
       name: 'mobile-h5',
+      testIgnore: /admin-/,
       use: { ...devices['Pixel 7'], ...(CHANNEL ? { channel: CHANNEL } : {}) },
+    },
+    {
+      // TK-23 科长后台（PC Web 布局 :5174）：桌面视口跑后台框架与权限的客户端半边
+      name: 'desktop-admin',
+      testMatch: /admin-.*\.spec\.ts/,
+      use: {
+        ...devices['Desktop Chrome'],
+        baseURL: 'http://localhost:5174',
+        ...(CHANNEL ? { channel: CHANNEL } : {}),
+      },
     },
   ],
   webServer: [
@@ -55,6 +67,13 @@ export default defineConfig({
       command: 'pnpm --filter @handover/h5 dev',
       cwd: REPO_ROOT,
       url: 'http://localhost:5173',
+      reuseExistingServer: true,
+      timeout: 120_000,
+    },
+    {
+      command: 'pnpm --filter @handover/admin dev',
+      cwd: REPO_ROOT,
+      url: 'http://localhost:5174',
       reuseExistingServer: true,
       timeout: 120_000,
     },
