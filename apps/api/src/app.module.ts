@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { APP_FILTER } from '@nestjs/core';
 import { ScheduleModule } from '@nestjs/schedule';
+import { AdminModule } from './admin/admin.module';
 import { AppController } from './app.controller';
 import { AuthModule } from './auth/auth.module';
 import { ApiErrorFilter } from './common/api-error.filter';
@@ -15,8 +16,9 @@ import { RecordsModule } from './records/records.module';
  * TK-05 接入交接记录（今日交接首页）；TK-11 接入配置只读（表单选项白名单，DATA-07）；
  * TK-17 接入电梯预期状态只读端点（GET /elevators/expected，D-T22）；
  * TK-22 接入站内通知（契约 §3.5）与服务端定时任务四件（ScheduleModule 官方调度，
- * 扫描本体时间可注入、测试静默，见 notifications.scheduler.ts）。
- * 后续按技术方案 §3 模块划分逐个接入（排班、预警、配置中心全量、附件、审计）。
+ * 扫描本体时间可注入、测试静默，见 notifications.scheduler.ts）；
+ * TK-23 接入管理后台框架（契约 §3.6，类级 chief 守卫，师傅访问一律 403）。
+ * 后续按技术方案 §3 模块划分逐个接入（排班、预警、附件）。
  */
 @Module({
   imports: [
@@ -26,6 +28,7 @@ import { RecordsModule } from './records/records.module';
     ConfigsModule,
     ElevatorsModule,
     NotificationsModule,
+    AdminModule,
     ScheduleModule.forRoot(),
   ],
   controllers: [AppController],

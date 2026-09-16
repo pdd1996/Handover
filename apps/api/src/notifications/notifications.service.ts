@@ -250,36 +250,7 @@ export class NotificationsService {
    * 直接比较日历日与分钟（localWallClock，见 duty-date.ts 导出注）。
    */
   async runMissingSubmitScan(now: Date): Promise<number> {
-    const deadline = await this.missingSubmitDeadline();
-    const deadlineMinutes = parseClockMinutes(deadline);
-    const { dutyDate: currentShift } = await this.recordsService.resolveDutyDate(now);
-    const windowDays = await this.recordsService.backfillWindowDays();
-    const lowerBound = minusDays(currentShift, windowDays); // 窗口外班次无法补交（D-T21 L3），不再提醒
-    const { date: today, minutes: nowMinutes } = localWallClock(now);
-
-    const rows = await this.db
-      .select({ dutyDate: schedules.dutyDate, userId: schedules.userId, realName: users.realName })
-      .from(schedules)
-      .innerJoin(users, eq(users.id, schedules.userId))
-      .where(gte(schedules.dutyDate, lowerBound));
-    const due = rows.filter((r) => {
-      const dueDate = plusOneDay(r.dutyDate); // 截止日 = 排班日 + 1 天
-      return dueDate < today || (dueDate === today && deadlineMinutes <= nowMinutes);
-    });
-    if (due.length === 0) return 0;
-
-    // 漏交判定以 records 行存在为准（台账增补 #27；draft 撤回未重提也不算漏交）
-    const existing = await this.db
-      .select({ dutyDate: records.dutyDate })
-      .from(records)
-      .where(
-        inArray(
-          records.dutyDate,
-          due.map((d) => d.dutyDate),
-        ),
-      );
-    const hasRecord = new Set(existing.map((e) => e.dutyDate));
-    const missing = due.filter((d) => !hasRecord.has(d.dutyDate));
+    const missing = await this.missingSubmitShifts(now);
     if (missing.length === 0) return 0;
     const chiefs = await this.activeChiefs();
     if (chiefs.length === 0) {
@@ -308,6 +279,49 @@ export class NotificationsService {
     );
     if (inserts.length > 0) await this.db.insert(notifications).values(inserts);
     return inserts.length;
+  }
+
+  /**
+   * F6-06 漏交班次集合（**单一判定实现**，扫描与后台视图 GET /admin/missing-submits 共用，
+   * 契约 §3.6「数据源与 missing_submit 通知一致」）：
+   * - 截止判定在墙钟空间：班次 D 过（D+1）日 `missing_submit_deadline`（默认 09:00）仍未提交；
+   * - 漏交判定以 records 行存在为准（台账增补 #27：任意状态含 draft 撤回未重提均不算漏交）；
+   * - 扫描窗口 = 当前班次 − `backfill_window_days`（窗口外班次无法经补交端点补救，
+   *   D-T21 L3——视图与扫描同样不列出，否则首次部署/长期停机后集中刷屏且无处置入口）。
+   */
+  async missingSubmitShifts(
+    now: Date,
+  ): Promise<Array<{ dutyDate: string; userId: number; realName: string }>> {
+    const deadline = await this.missingSubmitDeadline();
+    const deadlineMinutes = parseClockMinutes(deadline);
+    const { dutyDate: currentShift } = await this.recordsService.resolveDutyDate(now);
+    const windowDays = await this.recordsService.backfillWindowDays();
+    const lowerBound = minusDays(currentShift, windowDays); // 窗口外班次无法补交（D-T21 L3），不再提醒
+    const { date: today, minutes: nowMinutes } = localWallClock(now);
+
+    const rows = await this.db
+      .select({ dutyDate: schedules.dutyDate, userId: schedules.userId, realName: users.realName })
+      .from(schedules)
+      .innerJoin(users, eq(users.id, schedules.userId))
+      .where(gte(schedules.dutyDate, lowerBound));
+    const due = rows.filter((r) => {
+      const dueDate = plusOneDay(r.dutyDate); // 截止日 = 排班日 + 1 天
+      return dueDate < today || (dueDate === today && deadlineMinutes <= nowMinutes);
+    });
+    if (due.length === 0) return [];
+
+    // 漏交判定以 records 行存在为准（台账增补 #27；draft 撤回未重提也不算漏交）
+    const existing = await this.db
+      .select({ dutyDate: records.dutyDate })
+      .from(records)
+      .where(
+        inArray(
+          records.dutyDate,
+          due.map((d) => d.dutyDate),
+        ),
+      );
+    const hasRecord = new Set(existing.map((e) => e.dutyDate));
+    return due.filter((d) => !hasRecord.has(d.dutyDate));
   }
 
   /** 任务四：清理过期的会话存根行（技术方案 §6）。sessions 列为 UTC 串，比较同 UTC 空间 */
