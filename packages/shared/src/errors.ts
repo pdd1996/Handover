@@ -5,7 +5,7 @@
  * 所有 4xx 响应体统一为 ApiError；missing_fields[] 逐条点名缺失/越界字段并给前端跳转锚点。
  */
 
-import type { ErrorCode } from './enums';
+import type { ErrorCode, WithdrawNotAllowedReason } from './enums';
 import { FIELD_BY_NAME, type RecordFieldName } from './fields';
 import { ELEVATOR_SECTION_NO, type SectionNo } from './sections';
 
@@ -122,6 +122,13 @@ export interface ApiError {
   missing_fields: MissingField[] | null;
   /** 防呆/安全阀待确认清单；否则 null */
   need_confirm: NeedConfirm;
+  /**
+   * 不可撤回原因（TK-21，F2-10）：**仅 `WITHDRAW_NOT_ALLOWED` 使用**，取
+   * `WithdrawNotAllowedReason` 三值之一（WINDOW_EXPIRED / ALREADY_CONFIRMED / IN_OBJECTION），
+   * 供客户端按原因分支提示（窗口过期/已确认→走异议流程）与接口用例逐条断言；其余错误码为 null。
+   * 载体定案见契约 §2 订正（reason 由错误码表括注升为响应字段，机器可读）。
+   */
+  reason: WithdrawNotAllowedReason | null;
   /** 日志追踪 id */
   request_id: string;
 }

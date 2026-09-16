@@ -192,3 +192,19 @@ export function isValidLocalTimestamp(s: string): boolean {
     date.getSeconds() === sec
   );
 }
+
+/**
+ * 本地时间戳字面量 `YYYY-MM-DD HH:mm:ss` → **本地时** Date（`localMeasuredAt` 的逆运算，TK-21）。
+ * 按本地分量重构（非 `new Date(str)` 的 UTC/本地歧义解析），与 `localMeasuredAt`（取本地分量）
+ * 互为逆运算，与 `new Date()`（同为本地）同框相减无时区偏差。消费方：
+ * - api 撤回窗口判定（now − submitted_at，records.service.ts withdraw）；
+ * - h5 撤回倒计时（submitted_at + 窗口 − now，TodayView）——两端同一解析，杜绝各写一份。
+ * 非法/空字串返回 null（调用方自定保守语义：api 拒绝、h5 不起倒计时）。
+ */
+export function localTimestampToDate(s: string): Date | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/.exec(s.trim());
+  if (!m) return null;
+  const num = (v: string | undefined): number => Number(v ?? NaN);
+  const d = new Date(num(m[1]), num(m[2]) - 1, num(m[3]), num(m[4]), num(m[5]), num(m[6]));
+  return Number.isNaN(d.getTime()) ? null : d;
+}

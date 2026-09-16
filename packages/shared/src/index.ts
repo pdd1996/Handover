@@ -41,6 +41,7 @@ export const API_CONTRACT_ERROR_EXAMPLE = {
     { field: 'hp_status', section: 2, label: '高配房是否正常', anchor: '#sec-2-hp-status' },
   ],
   need_confirm: null,
+  reason: null,
   request_id: 'req-xxxx',
 } satisfies ApiError;
 

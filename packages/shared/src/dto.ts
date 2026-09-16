@@ -125,6 +125,12 @@ export interface TodayDto {
   duty_date: string;
   /** 班次分界时刻（回显便于排查跨天归属；❓ 待科长确认，台账待确认清单第 8 项） */
   shift_start_time: string;
+  /**
+   * 撤回窗口时长（分钟，TK-21/F2-09）：服务端读 configs `withdraw_window_minutes`（非法/缺失
+   * 回落 10，与种子同源）。前端据 `record.submitted_at + 本值` 算撤回倒计时（F2-09-T1「倒计时
+   * 与窗口一致」）；**服务端撤回校验用同一配置值**，两端同源不漂移（F4-11 运营口径后台可配）。
+   */
+  withdraw_window_minutes: number;
   record: TodayRecordDto | null;
   /**
    * 待同步标记。**TK-05 阶段恒为 false 的占位**：离线待同步队列存于客户端 IndexedDB，
@@ -311,6 +317,21 @@ export interface SubmitResultDto {
    * 逐变更项审计 `record.recalc`（契约 §5），手工覆盖项豁免（D-T07）。
    */
   recalc?: RecalcResultDto | null;
+}
+
+/**
+ * POST /records/today/withdraw 响应体（TK-21，F2-08「撤回回到可编辑状态」的回执）。
+ * 撤回后状态转 draft、submitted_at 清空、version 不变（重提才 +1，F2-08-T2）；
+ * 读数列保留（师傅继续改），提交时生成的 alerts/elevator_checks 同事务清空（快照语义，
+ * 与 submitCore 重提先清后插同源）。接班人端待确认入口随 status 转 draft 同步消失（F2-09-T2）。
+ */
+export interface WithdrawResultDto {
+  id: number;
+  record_no: string;
+  /** 撤回后恒 'draft'（技术方案 §5.4 状态机：已提交 →（10 分钟内撤回）草稿） */
+  status: RecordStatus;
+  /** 版本不变（重提时 submitCore 走 draft 分支 version+1，F2-08-T2） */
+  version: number;
 }
 
 // ── 契约 §3.4 交接确认（接班人；F2-02、F2-03；TK-18）─────────────────────────────
