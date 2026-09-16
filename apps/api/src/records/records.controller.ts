@@ -1,14 +1,21 @@
-import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Put, UseGuards } from '@nestjs/common';
 import type {
   AcknowledgePayloadDto,
   AcknowledgeResultDto,
   BackfillPayloadDto,
   ConfirmPayloadDto,
   ConfirmResultDto,
+  ObjectionListDto,
+  ObjectionPayloadDto,
+  ObjectionResultDto,
   PendingListDto,
   PrevDto,
   PreviewDto,
   RecordDetailDto,
+  RecordUpdatePayloadDto,
+  RecordUpdateResultDto,
+  ResubmitPayloadDto,
+  ResubmitResultDto,
   SubmitPayloadDto,
   SubmitResultDto,
   TodayDto,
@@ -82,6 +89,22 @@ export class RecordsController {
   @Roles('master')
   pending(@CurrentUser() user: SessionUser): Promise<PendingListDto> {
     return this.records.pending(user);
+  }
+
+  /**
+   * GET /api/v1/records/mine/objections —— 我被退回的异议单（TK-20，契约 §3.2；F2-06、F2-13）。
+   *
+   * 取数口径：**我为 submitter 且 status='objection'**（重提转回 submitted 即从清单消失）。
+   * 交班人下次到岗处理的待办清单（F2-13 轮值制：退回时可能已离院，内网无法即时修改）。
+   * 路由序：静态段，必须声明在 GET :id 之前（同 today/pending 的动态段吞并防范）。
+   *
+   * 角色：契约 §3.2 角色列原样 `master`——异议修改是交班人的责任动作（D-P06 留痕责任链）。
+   */
+  @Get('mine/objections')
+  @UseGuards(SessionGuard, RolesGuard)
+  @Roles('master')
+  objections(@CurrentUser() user: SessionUser): Promise<ObjectionListDto> {
+    return this.records.objections(user);
   }
 
   /**
@@ -175,6 +198,64 @@ export class RecordsController {
     @Body() payload: ConfirmPayloadDto,
   ): Promise<ConfirmResultDto> {
     return this.records.confirm(user, Number(id), payload);
+  }
+
+  /**
+   * POST /api/v1/records/{id}/objection —— 标注异议（TK-20，契约 §3.4；F2-06/D-P06）。
+   *
+   * body 传 `note`（必填，空白 400 点名、超 500 字 400 越界，shared dto ObjectionPayloadDto）；
+   * 行锁下转 objection + objection_at=服务端时刻 + 审计 `record.objection`（契约 §5）。
+   * 仅接班人本人（服务层 403，D-P06 责任锚点，与 acknowledge/confirm 同门）；
+   * 非 submitted 状态 409 CONFIRM_INCOMPLETE 同族（文案区分）。
+   * 角色：`master`（同 acknowledge）。
+   */
+  @Post(':id/objection')
+  @UseGuards(SessionGuard, RolesGuard)
+  @Roles('master')
+  objection(
+    @CurrentUser() user: SessionUser,
+    @Param('id') id: string,
+    @Body() payload: ObjectionPayloadDto,
+  ): Promise<ObjectionResultDto> {
+    return this.records.objection(user, Number(id), payload);
+  }
+
+  /**
+   * PUT /api/v1/records/{id} —— 异议单修改（TK-20，契约 §3.2；F2-07/D-T23）。
+   *
+   * body 传 `sections`（部分合并语义，shared dto RecordUpdatePayloadDto）：仅上送字段写入、
+   * status 仍 objection、version 不变；本版本首次修改时把修改前全字段快照定格入
+   * record_versions（F2-07-T1「快照/变更字段/旧值/修改人」）。仅交班人本人（服务层 403）。
+   * 角色：`master`。
+   */
+  @Put(':id')
+  @UseGuards(SessionGuard, RolesGuard)
+  @Roles('master')
+  updateObjection(
+    @CurrentUser() user: SessionUser,
+    @Param('id') id: string,
+    @Body() payload: RecordUpdatePayloadDto,
+  ): Promise<RecordUpdateResultDto> {
+    return this.records.updateObjectionRecord(user, Number(id), payload);
+  }
+
+  /**
+   * POST /api/v1/records/{id}/resubmit —— 异议修改后重提（TK-20，契约 §3.2；F2-07/D-T23）。
+   *
+   * 表单值以 PUT 已写入行的值为准；body 仅可选 confirmations/usage_overrides（防呆 409 与
+   * 覆盖协议同 §4，shared dto ResubmitPayloadDto）。重提重走完整校验/防呆/计算，version+1、
+   * submitted_at 更新，下游 D+1 已提交单触发重算（复用 recalcDownstream，响应带 recalc）。
+   * 仅交班人本人（服务层 403）。角色：`master`。
+   */
+  @Post(':id/resubmit')
+  @UseGuards(SessionGuard, RolesGuard)
+  @Roles('master')
+  resubmit(
+    @CurrentUser() user: SessionUser,
+    @Param('id') id: string,
+    @Body() payload: ResubmitPayloadDto,
+  ): Promise<ResubmitResultDto> {
+    return this.records.resubmit(user, Number(id), payload);
   }
 
   /**

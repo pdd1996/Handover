@@ -74,6 +74,14 @@ import {
   type SubmitResultDto,
   type TodayDto,
   type MissingTarget,
+  type ObjectionListDto,
+  type ObjectionPayloadDto,
+  type ObjectionResultDto,
+  type RecordUpdatePayloadDto,
+  type RecordUpdateResultDto,
+  type RecordVersionSummaryDto,
+  type ResubmitPayloadDto,
+  type ResubmitResultDto,
   type UsageFieldName,
   type UsageOverridePayload,
 } from '@handover/shared';
@@ -86,6 +94,7 @@ import {
   configs,
   elevatorChecks,
   elevators,
+  recordVersions,
   records,
   schedules,
   spots,
@@ -238,6 +247,15 @@ const SIGNATURE_BAD_PAYLOAD = (): MissingField => ({
   anchor: '#sec-0-signature',
 });
 
+/** 异议原因缺失/超长的合成定位项（TK-20，F2-06；域外回显同 signature 先例——
+ * objection_note 是记录级列、非附录 A 表单字段，不在 MissingTarget 取值域） */
+const OBJECTION_NOTE_MISSING = (): MissingField => ({
+  field: 'objection_note' as MissingTarget,
+  section: 0,
+  label: '异议原因',
+  anchor: '#sec-0-objection-note',
+});
+
 const USAGE_OVERRIDE_BAD_PAYLOAD = (): MissingField => ({
   field: 'usage_overrides' as MissingTarget,
   section: 4,
@@ -256,6 +274,15 @@ const RECORD_DB_COLUMNS: ReadonlySet<string> = new Set(
 
 /** records 表对象的 TS 属性名集合（camelCase） */
 const RECORD_TS_KEYS: ReadonlySet<string> = new Set(Object.keys(records));
+
+/**
+ * TS 属性名（camelCase）→ 字段字典名（snake_case，仅 records 存储列）：PUT 变更清单与
+ * 快照 diff 的键空间归一（record_versions.changed/snapshot 以字典名存储，人读友好且与
+ * FIELDS 字典对齐；normalizeSections 产出的 TS 键经此映射回字典名）。
+ */
+const TS_KEY_TO_FIELD: ReadonlyMap<string, RecordFieldName> = new Map(
+  FIELDS.filter((f) => RECORD_TS_KEYS.has(toTsKey(f.name))).map((f) => [toTsKey(f.name), f.name]),
+);
 
 /** DB 列名（snake_case）→ Drizzle TS 属性名（camelCase） */
 function toTsKey(columnName: string): string {
@@ -307,6 +334,50 @@ function sameUsageValue(a: unknown, b: unknown): boolean {
   // 直接 === 即可：number 与 null 比为 false（null 与非 null 视为不同）、null===null 为 true、
   // 数值比数值（评审二轮 m1：原三元两分支一字不差，纯误导）
   return num(a) === num(b);
+}
+
+/**
+ * 字段值判等（TK-20 快照 diff 用，与 recalc 的 sameUsageValue 同一数值判等纪律，M1 教训）：
+ * 两值均可解析为数值时按数值比（客户端 '50' 与 DECIMAL 列读回 '50.0' 同值，字符串比对会把
+ * 数值相同的修改误判为变更）；数组（hvac_locs）JSON 序列化比对；其余按字符串；
+ * null 与非 null 恒不等。注意与 sameUsageValue 的差异：非数值字符串各自比对（不判等），
+ * 'ok' 与 'bad' 不会被误判相同。
+ */
+function sameFieldValue(a: unknown, b: unknown): boolean {
+  if (a === null || a === undefined || b === null || b === undefined) {
+    return (a ?? null) === (b ?? null);
+  }
+  if (Array.isArray(a) || Array.isArray(b)) return JSON.stringify(a) === JSON.stringify(b);
+  const pa = parseNumeric(String(a));
+  const pb = parseNumeric(String(b));
+  if (pa !== null && pb !== null) return pa === pb;
+  return String(a) === String(b);
+}
+
+/**
+ * 快照 diff（TK-20，F2-07-T1「变更字段、旧值」）：基线（字段名字典空间）vs 修改后，
+ * 产出 record_versions.changed 形态（字段名 → { old, new }）。
+ */
+function diffSnapshotValues(
+  baseline: Readonly<Record<string, unknown>>,
+  next: Readonly<Record<string, unknown>>,
+): Record<string, { old: unknown; new: unknown }> {
+  const changed: Record<string, { old: unknown; new: unknown }> = {};
+  for (const [name, nextV] of Object.entries(next)) {
+    const oldV = baseline[name] ?? null;
+    if (!sameFieldValue(oldV, nextV)) changed[name] = { old: oldV, new: nextV };
+  }
+  return changed;
+}
+
+/**
+ * MySQL 唯一键冲突归一（TK-16 挂账闭环，契约订正 18 ⑧）：existing 预检与 INSERT 之间的
+ * 并发窗口撞 duty_date/record_no UNIQUE 时 mysql2 抛 ER_DUP_ENTRY（errno 1062），
+ * 按 RECORD_EXISTS 409 语义归一而非 500（与 recalc 下游行锁同批补齐）。
+ */
+function isDuplicateEntryError(e: unknown): boolean {
+  const err = e as { code?: string; errno?: number } | null;
+  return err?.code === 'ER_DUP_ENTRY' || err?.errno === 1062;
 }
 
 // 班次日期纯函数（localParts/minusOneDay/parseClock/shiftDutyDate）已抽取至 ./duty-date：
@@ -595,7 +666,7 @@ export class RecordsService {
     if (!found) throw new ApiException('NOT_FOUND', '交接单不存在或已被删除');
     const row = found.row;
 
-    const [alertRows, checkRows] = await Promise.all([
+    const [alertRows, checkRows, versionRows] = await Promise.all([
       this.db.select().from(alerts).where(eq(alerts.recordId, id)),
       this.db
         .select({
@@ -610,6 +681,20 @@ export class RecordsService {
         .leftJoin(elevators, eq(elevatorChecks.elevatorId, elevators.id))
         .where(eq(elevatorChecks.recordId, id))
         .orderBy(asc(elevatorChecks.id)),
+      // 历史版本摘要（TK-20，F2-07-T1「历史版本可查」）：editor 联 users 回显姓名；
+      // 全字段快照不入响应（record_versions.snapshot 留库供审计/双轨比对深查）
+      this.db
+        .select({
+          version: recordVersions.version,
+          changed: recordVersions.changed,
+          editedAt: recordVersions.editedAt,
+          editorId: users.id,
+          editorName: users.realName,
+        })
+        .from(recordVersions)
+        .leftJoin(users, eq(recordVersions.editorId, users.id))
+        .where(eq(recordVersions.recordId, id))
+        .orderBy(desc(recordVersions.version)),
     ]);
     // 置顶序（F2-03）：shared ALERT_LEVEL_RANK 同一权重表，前端不再各排一套
     const sortedAlerts: AlertDto[] = [...alertRows]
@@ -633,6 +718,16 @@ export class RecordsService {
       explanation: c.explanation,
     }));
 
+    const versions: RecordVersionSummaryDto[] = versionRows.map((v) => ({
+      version: v.version,
+      editor:
+        v.editorId != null
+          ? { id: v.editorId, real_name: v.editorName ?? String(v.editorId) }
+          : null,
+      edited_at: v.editedAt,
+      changed: (v.changed ?? {}) as Record<string, { old: unknown; new: unknown }>,
+    }));
+
     return {
       id: row.id,
       record_no: row.recordNo,
@@ -651,6 +746,7 @@ export class RecordsService {
       elevator_checks: checks,
       confirmed_at: row.confirmedAt,
       signature_path: row.signaturePath,
+      versions,
     };
   }
 
@@ -789,6 +885,564 @@ export class RecordsService {
         signature_path: signaturePath,
       } satisfies ConfirmResultDto;
     });
+  }
+
+  // ── 异议与版本（TK-20：契约 §3.2/§3.4；F2-06、F2-07；决策记录 D-T23）────────────
+
+  /**
+   * 标注异议闸门（objection 专用，与 confirmableRecordOf 同构的单一实现）：
+   * - 404 NOT_FOUND：单不存在（含非数字 id，与 detail 同一口径）；
+   * - 403 FORBIDDEN：登录人非该单接班人——异议是接班人的责任界定动作（D-P06），
+   *   他人代标会弱化责任归属；chief 由角色守卫拦外（契约 §3.4 角色列 master）；
+   * - 409 CONFIRM_INCOMPLETE：非 submitted（draft/objection/completed 均无「退回」语义）——
+   *   错误码 13 项外不增设新码，同族 409 文案区分（TK-19 先例）。
+   */
+  private async objectionMarkableRecordOf(
+    id: number,
+    user: SessionUser,
+  ): Promise<typeof records.$inferSelect> {
+    if (!Number.isInteger(id) || id <= 0) {
+      throw new ApiException('NOT_FOUND', '交接单不存在或已被删除');
+    }
+    const rows = await this.db.select().from(records).where(eq(records.id, id)).limit(1);
+    const row = rows[0];
+    if (!row) throw new ApiException('NOT_FOUND', '交接单不存在或已被删除');
+    if (row.receiverId !== user.id) {
+      throw new ApiException('FORBIDDEN', '仅接班人本人可标注异议退回');
+    }
+    if (row.status !== 'submitted') {
+      throw new ApiException('CONFIRM_INCOMPLETE', '交接单当前状态不允许标注异议');
+    }
+    return row;
+  }
+
+  /**
+   * 异议单编辑闸门（PUT 修改与 resubmit 重提共用，单一实现防两套口径）：
+   * - 404 NOT_FOUND：单不存在（含非数字 id）；
+   * - 403 FORBIDDEN：登录人非该单交班人——退回对象是交班人，修改是其责任动作
+   *   （D-P06 留痕责任链；接班人/他人代改 403，chief 由角色守卫拦外）；
+   * - 409 CONFIRM_INCOMPLETE：仅 objection 可编辑——submitted 单的修改走撤回（F2-08，
+   *   TK-21），draft/completed 亦无异议修改语义（同族 409 文案区分）。
+   */
+  private async objectionEditableRecordOf(
+    id: number,
+    user: SessionUser,
+  ): Promise<typeof records.$inferSelect> {
+    if (!Number.isInteger(id) || id <= 0) {
+      throw new ApiException('NOT_FOUND', '交接单不存在或已被删除');
+    }
+    const rows = await this.db.select().from(records).where(eq(records.id, id)).limit(1);
+    const row = rows[0];
+    if (!row) throw new ApiException('NOT_FOUND', '交接单不存在或已被删除');
+    if (row.submitterId !== user.id) {
+      throw new ApiException('FORBIDDEN', '仅交班人本人可修改被退回的异议单');
+    }
+    if (row.status !== 'objection') {
+      throw new ApiException('CONFIRM_INCOMPLETE', '交接单当前状态不允许异议修改或重提');
+    }
+    return row;
+  }
+
+  /**
+   * GET /records/mine/objections（F2-06「退回交班人」的取数半边 + F2-13 下次到岗处理）：
+   * 我为 submitter 且 status='objection'（重提后转回 submitted 即从清单消失）。
+   * 按 duty_date 降序（最近被退回的在前）。
+   */
+  async objections(user: SessionUser): Promise<ObjectionListDto> {
+    const receiverU = alias(users, 'objection_receiver');
+    const rows = await this.db
+      .select({
+        id: records.id,
+        recordNo: records.recordNo,
+        dutyDate: records.dutyDate,
+        status: records.status,
+        version: records.version,
+        submittedAt: records.submittedAt,
+        objectionNote: records.objectionNote,
+        objectionAt: records.objectionAt,
+        receiverId: receiverU.id,
+        receiverName: receiverU.realName,
+      })
+      .from(records)
+      .leftJoin(receiverU, eq(records.receiverId, receiverU.id))
+      .where(and(eq(records.submitterId, user.id), eq(records.status, 'objection')))
+      .orderBy(desc(records.dutyDate));
+    return {
+      items: rows.map((r) => ({
+        id: r.id,
+        record_no: r.recordNo,
+        duty_date: r.dutyDate,
+        status: r.status,
+        version: r.version,
+        submitted_at: r.submittedAt,
+        objection_note: r.objectionNote ?? '',
+        objection_at: r.objectionAt ?? '',
+        receiver:
+          r.receiverId != null
+            ? { id: r.receiverId, real_name: r.receiverName ?? String(r.receiverId) }
+            : null,
+      })),
+    };
+  }
+
+  /**
+   * POST /records/{id}/objection（F2-06，D-T23 拍板：仅接班人本人）：
+   * note 必填（空白 400 点名、超 objection_note 列容量 varchar(500) 400 越界）→
+   * 行锁下转 objection + objection_at=服务端时刻 + 审计 `record.objection`（契约 §5：
+   * reason 列「—」，原因记 newValue.note）。重提后 objection_note/at 保留在行上
+   * （「曾被退回及原因」的历史，详情页可直接展示；escalated_at 主权随 TK-22 定时任务）。
+   */
+  async objection(
+    user: SessionUser,
+    id: number,
+    payload: ObjectionPayloadDto,
+  ): Promise<ObjectionResultDto> {
+    const row = await this.objectionMarkableRecordOf(id, user);
+    const note = typeof payload?.note === 'string' ? payload.note.trim() : '';
+    if (note === '') {
+      throw new ApiException('VALIDATION_MISSING_FIELDS', '请填写异议原因', {
+        missingFields: [OBJECTION_NOTE_MISSING()],
+      });
+    }
+    if (note.length > 500) {
+      throw new ApiException('VALIDATION_OUT_OF_RANGE', '异议原因过长（上限 500 字）', {
+        missingFields: [OBJECTION_NOTE_MISSING()],
+      });
+    }
+    const objectionAt = localMeasuredAt();
+    await this.db.transaction(async (tx) => {
+      // 行锁串行化：标注与接班人确认/交班人撤回并发时，必有一方在锁上看到对方提交后的状态
+      const locked = await tx
+        .select({ status: records.status })
+        .from(records)
+        .where(eq(records.id, row.id))
+        .limit(1)
+        .for('update');
+      if (locked[0]?.status !== 'submitted') {
+        throw new ApiException('CONFIRM_INCOMPLETE', '交接单当前状态不允许标注异议');
+      }
+      await tx
+        .update(records)
+        .set({ status: 'objection', objectionNote: note, objectionAt })
+        .where(eq(records.id, row.id));
+      await tx.insert(auditLogs).values({
+        actorId: user.id,
+        action: 'record.objection',
+        targetType: 'record',
+        targetId: row.recordNo,
+        oldValue: { status: 'submitted', version: row.version },
+        newValue: { status: 'objection', version: row.version, note },
+      });
+    });
+    return {
+      id: row.id,
+      record_no: row.recordNo,
+      status: 'objection',
+      version: row.version,
+      objection_note: note,
+      objection_at: objectionAt,
+    } satisfies ObjectionResultDto;
+  }
+
+  /**
+   * PUT /records/{id}（F2-07 异议单修改，D-T23 拍板「直写行 + 首改快照」）：
+   * - 语义：**部分合并**——仅上送字段写入（异议修改场景是「改值」；清空字段暂不支持，
+   *   随 h5 修改页需要时扩展显式 null 语义）；status 仍 objection、version 不变；
+   * - 快照：本版本**首次修改**时把修改前全字段定格入 record_versions（version=当前版本、
+   *   snapshot=旧全字段、changed=差异、editor=修改人）；重复 PUT 不重复插行
+   *   （UNIQUE(record_id, version)），原版定格于首改前，changed 按基线重算累计口径；
+   * - 校验：字段级形状（枚举/数值/长度/停机清列）与 submit 同一 normalizeSections，
+   *   越值 400 点名；**必填完整性不在此拦**（允许分次修改，重提时把关）。
+   */
+  async updateObjectionRecord(
+    user: SessionUser,
+    id: number,
+    payload: RecordUpdatePayloadDto,
+  ): Promise<RecordUpdateResultDto> {
+    const row = await this.objectionEditableRecordOf(id, user);
+    const sections = (payload?.sections ?? {}) as Readonly<
+      Partial<Record<RecordFieldName, unknown>>
+    >;
+    const { values, outOfRange } = this.normalizeSections(sections);
+    // 用量列不随 PUT 改写（normalize 已置 null——剔除后重提前保留原固化值，重提时重算固化）
+    for (const key of SERVER_CALCULATED_KEYS) delete values[key];
+    if (outOfRange.length > 0) {
+      throw new ApiException('VALIDATION_OUT_OF_RANGE', '部分字段取值越界，请核对后重试', {
+        missingFields: outOfRange,
+      });
+    }
+
+    let changed: Record<string, { old: unknown; new: unknown }> = {};
+    await this.db.transaction(async (tx) => {
+      const locked = await tx
+        .select()
+        .from(records)
+        .where(eq(records.id, row.id))
+        .limit(1)
+        .for('update');
+      const current = locked[0];
+      if (!current || current.status !== 'objection') {
+        throw new ApiException('CONFIRM_INCOMPLETE', '交接单当前状态不允许修改（可能已被重提）');
+      }
+      // 首改快照：本版本快照缺行时定格修改前状态；已有则基于快照重算累计 diff
+      const prior = await tx
+        .select({ snapshot: recordVersions.snapshot })
+        .from(recordVersions)
+        .where(
+          and(eq(recordVersions.recordId, row.id), eq(recordVersions.version, current.version)),
+        )
+        .limit(1);
+      const baseline = (prior[0]?.snapshot ?? this.readingsOf(current)) as Record<string, unknown>;
+      // 合并视图（提交侧「草稿 ?? 服务端值」同思路）：以**当前行状态**（含此前 PUT 已落库
+      // 修改）叠加本次上送合成 prospective 状态，相对快照基线 diff——changed 恒为
+      // 「原版 → 当前待重提状态」的累计口径（基于快照合并会丢失首改字段）；
+      // 两侧统一映射到字段字典名空间（baseline 快照即字典名键，勿混 TS 键）
+      const merged: Record<string, unknown> = {};
+      for (const [key, v] of Object.entries(this.rowValuesOf(current))) {
+        const name = TS_KEY_TO_FIELD.get(key);
+        if (name) merged[name] = v;
+      }
+      for (const [key, v] of Object.entries(values)) {
+        const name = TS_KEY_TO_FIELD.get(key);
+        if (name) merged[name] = v;
+      }
+      changed = diffSnapshotValues(baseline, merged);
+      if (prior[0]) {
+        await tx
+          .update(recordVersions)
+          .set({ changed, editorId: user.id, editedAt: localMeasuredAt() })
+          .where(
+            and(eq(recordVersions.recordId, row.id), eq(recordVersions.version, current.version)),
+          );
+      } else {
+        await tx.insert(recordVersions).values({
+          recordId: row.id,
+          version: current.version,
+          snapshot: baseline,
+          changed,
+          editorId: user.id,
+          editedAt: localMeasuredAt(),
+        });
+      }
+      if (Object.keys(values).length > 0) {
+        await tx.update(records).set(values).where(eq(records.id, row.id));
+      }
+    });
+    return {
+      id: row.id,
+      record_no: row.recordNo,
+      status: 'objection',
+      version: row.version,
+      changed: Object.keys(changed),
+    } satisfies RecordUpdateResultDto;
+  }
+
+  /**
+   * POST /records/{id}/resubmit（F2-07 异议修改后重提，D-T23 拍板）：
+   * 表单值以 PUT 已写入行的值为准（重提从行上读数重走校验/防呆/计算，与 submit 消费
+   * 同一套函数）；请求体仅可选 confirmations/usage_overrides（防呆 409 与覆盖协议同 §4）。
+   * - 完整性把关：validateForSubmit 对行上值全量校验，缺项 400 点名（不放行半张单）；
+   * - version+1、submitted_at=服务端时刻（PRD 附录 A：重新提交即更新交接时间）；
+   * - 标红重建（快照语义，TK-17 L3 同纪律）：alerts 先清后插，旧逐条知晓随旧版本作废；
+   * - 下游重算（TK-16 挂账闭环）：复用 recalcDownstreamInTx（行锁已补），trigger=_OBJ；
+   * - objection_note/at 保留在行上（历史留痕）；审计复用 record.submit（契约 §5 无独立行）。
+   */
+  async resubmit(
+    user: SessionUser,
+    id: number,
+    payload: ResubmitPayloadDto,
+  ): Promise<ResubmitResultDto> {
+    const row = await this.objectionEditableRecordOf(id, user);
+    const overrideCheck = this.validateUsageOverrides(payload?.usage_overrides);
+    const confirmCheck = this.validateConfirmations(payload?.confirmations);
+
+    // 必填完整性把关：以行上当前值（含 PUT 修改）为表单快照，与 submit 同一引擎
+    const result = this.validateForSubmit(this.readingsOf(row));
+    result.missing.push(...overrideCheck.missing);
+    result.outOfRange.push(...overrideCheck.outOfRange, ...confirmCheck.outOfRange);
+    const body = buildValidationError(result);
+    if (body) {
+      throw new ApiException(body.code, body.message, {
+        missingFields: [...body.missing_fields],
+      });
+    }
+
+    // 上一班取数与 submitCore 同源（adjacentPrevRow，D-T17）；相邻班次仍缺失时回落
+    // **原提交的补录基线**（record.prev_backfill 审计，D-T19 留痕即真值）——否则重提会把
+    // 原按补录值算好的用量清成 null
+    const prevRow = await this.adjacentPrevRow(row.dutyDate);
+    const backfillBase = prevRow ? null : await this.latestPrevBackfillOf(row.recordNo);
+    const prevGet: FieldValueGetter = prevRow
+      ? (name) => {
+          const key = recordKeyOf(name, this.logger);
+          return key ? ((prevRow[key as keyof typeof prevRow] as unknown) ?? null) : null;
+        }
+      : (name) => backfillBase?.[name as PrevBackfillField] ?? null;
+    const cur: FieldValueGetter = (name) => {
+      const key = recordKeyOf(name, this.logger);
+      return key ? ((row[key as keyof typeof row] as unknown) ?? null) : null;
+    };
+
+    // 防呆 409（与 submitCore 同口径：确认以归一清单为准、错位确认不消费）
+    const confirmedDecrease = new Map<DecreasedGuardField, string>();
+    const confirmedRefill = new Map<1 | 2, string>();
+    for (const c of confirmCheck.normalized) {
+      if (c.type === 'reading_decreased') {
+        if (!confirmedDecrease.has(c.field)) confirmedDecrease.set(c.field, c.reason);
+      } else if (!confirmedRefill.has(c.card)) {
+        confirmedRefill.set(c.card, c.reason);
+      }
+    }
+    const decreased = decreasedReadingsOf(cur, prevGet);
+    const refills = refillCardsOf(cur, prevGet);
+    const needConfirm = unconfirmedNeedConfirmItems(
+      cur,
+      prevGet,
+      new Set(confirmedDecrease.keys()),
+      new Set(confirmedRefill.keys()),
+    );
+    if (needConfirm.length > 0) {
+      const hasDecreased = needConfirm.some((c) => c.type === 'reading_decreased');
+      throw new ApiException(
+        hasDecreased ? 'READINGS_DECREASED' : 'GAS_REFILL_CONFIRMED',
+        '存在异常读数，请逐条确认后重新提交',
+        { needConfirm },
+      );
+    }
+
+    // 用量计算与覆盖（同 submitCore 第 ③ 步：确认充气卡按 0 计 D-P14、覆盖值固化）
+    const refilled = new Set<1 | 2>(
+      [...confirmedRefill.keys()].filter((card) => refills.some((r) => r.card === card)),
+    );
+    const usage = this.computeUsageValues(cur, prevGet, refilled);
+    const overrides = this.applyUsageOverrides(overrideCheck.valid, usage.auto);
+    Object.assign(usage.values, overrides.values);
+
+    const submittedAt = localMeasuredAt();
+    const version = row.version + 1;
+    const sourceValues = this.rowValuesOf(row); // 重算 prev 源（TS 键空间）
+    let recalc: ResubmitResultDto['recalc'] = null;
+    await this.db.transaction(async (tx) => {
+      const locked = await tx
+        .select({ status: records.status })
+        .from(records)
+        .where(eq(records.id, row.id))
+        .limit(1)
+        .for('update');
+      if (locked[0]?.status !== 'objection') {
+        throw new ApiException('CONFIRM_INCOMPLETE', '交接单当前状态不允许重提');
+      }
+      // 兜底快照：无 PUT 直接重提时本版本快照缺行——定格重提前状态，保证每个被替换的
+      // 版本在 record_versions 都有行（UNIQUE(record_id, version) 幂等）
+      const prior = await tx
+        .select({ id: recordVersions.id })
+        .from(recordVersions)
+        .where(and(eq(recordVersions.recordId, row.id), eq(recordVersions.version, row.version)))
+        .limit(1);
+      if (!prior[0]) {
+        await tx.insert(recordVersions).values({
+          recordId: row.id,
+          version: row.version,
+          snapshot: this.readingsOf(row),
+          changed: {},
+          editorId: user.id,
+          editedAt: localMeasuredAt(),
+        });
+      }
+      await tx
+        .update(records)
+        .set({ ...usage.values, status: 'submitted', submittedAt, version })
+        .where(eq(records.id, row.id));
+
+      // 标红重建（快照语义）：先清后插——电梯不一致沿行上核对明细重标（PUT 不改核对），
+      // 状态异常/交接事项按重提值重建（insertStatusAndHandoverAlertsInTx 与 submit 同一实现）
+      await tx.delete(alerts).where(eq(alerts.recordId, row.id));
+      const plans = await this.elevatorPlanMapOf();
+      const checkRows = await tx
+        .select()
+        .from(elevatorChecks)
+        .where(eq(elevatorChecks.recordId, row.id));
+      for (const c of checkRows) {
+        // actual 可空（schema 无 NOT NULL，§4.2 原样）：脏历史行按未核对处理，不标红
+        if (c.actual === null || !isMismatchOf(c.actual)) continue;
+        const name = plans.get(c.elevatorId)?.name ?? `电梯#${c.elevatorId}`;
+        const message =
+          `${name} 预期${elevatorExpectedLabel(c.expected)}、实际${elevatorActualLabel(c.actual)}` +
+          (c.explanation ? `：${c.explanation}` : '');
+        await tx.insert(alerts).values({
+          recordId: row.id,
+          ruleKey: 'elevator_mismatch',
+          target: `elevator:${c.elevatorId}`,
+          level: ELEVATOR_ALERT_LEVEL,
+          message: message.slice(0, 300),
+        });
+      }
+      await this.insertStatusAndHandoverAlertsInTx(tx, row.id, sourceValues);
+
+      // 审计（契约 §5 无独立 resubmit 行——重提即一次提交，复用 record.submit；
+      // newValue 记 resubmitted 供复核检索与版本归属区分）
+      await tx.insert(auditLogs).values({
+        actorId: user.id,
+        action: 'record.submit',
+        targetType: 'record',
+        targetId: row.recordNo,
+        reason: '异议修改后重提',
+        newValue: {
+          receiver_id: row.receiverId,
+          receiver_changed: false,
+          version,
+          resubmitted: true,
+        },
+      });
+      // 用量覆盖留痕（同 submitCore：逐覆盖项一行，oldValue 记覆盖前自动值）
+      for (const o of overrides.applied) {
+        await tx.insert(auditLogs).values({
+          actorId: user.id,
+          action: 'record.usage_override',
+          targetType: 'record',
+          targetId: row.recordNo,
+          oldValue: { field: o.field, auto_value: o.auto },
+          newValue: { field: o.field, value: o.value, version },
+          reason: o.reason,
+        });
+      }
+      // 防呆确认留痕（同 submitCore：仅命中项入账，逐命中项一行）
+      const confirmAudits = [
+        ...decreased.map((d) => ({
+          type: 'reading_decreased' as const,
+          field: d.field as string,
+          card: null as 1 | 2 | null,
+          prev: d.prev,
+          current: d.current,
+          reason: confirmedDecrease.get(d.field) ?? '',
+        })),
+        ...refills.map((r) => ({
+          type: 'gas_refill' as const,
+          field: GAS_CARD_FIELDS[r.card] as string,
+          card: r.card as 1 | 2 | null,
+          prev: r.prev,
+          current: r.current,
+          reason: confirmedRefill.get(r.card) ?? '',
+        })),
+      ];
+      for (const c of confirmAudits) {
+        await tx.insert(auditLogs).values({
+          actorId: user.id,
+          action: 'record.submit',
+          targetType: 'record',
+          targetId: row.recordNo,
+          newValue:
+            c.card === null
+              ? { type: c.type, field: c.field, prev: c.prev, current: c.current, version }
+              : { type: c.type, card: c.card, prev: c.prev, current: c.current, version },
+          reason: c.reason,
+        });
+      }
+
+      // 下游重算（TK-16 挂账闭环：行锁与 1062→409 已随本任务补齐，D-T21 修订）
+      recalc = await this.recalcDownstreamInTx(
+        tx,
+        row.dutyDate,
+        sourceValues,
+        user.id,
+        row.recordNo,
+        'objection_resubmit',
+      );
+    });
+    return {
+      id: row.id,
+      record_no: row.recordNo,
+      status: 'submitted',
+      version,
+      submitted_at: submittedAt,
+      recalc,
+    } satisfies ResubmitResultDto;
+  }
+
+  /**
+   * 原提交的补录基线（TK-20 重提专用）：`record.prev_backfill` 审计最新版本的 readings
+   * （D-T19「留痕即真值」）。重提场景上一班仍缺失时以此作计算/防呆基线，避免把原按
+   * 补录值固化的用量清成 null。无补录史返回 null（上一班真缺失）。
+   */
+  private async latestPrevBackfillOf(
+    recordNo: string,
+  ): Promise<Partial<Record<PrevBackfillField, number>> | null> {
+    const rows = await this.db
+      .select({ newValue: auditLogs.newValue })
+      .from(auditLogs)
+      .where(and(eq(auditLogs.action, 'record.prev_backfill'), eq(auditLogs.targetId, recordNo)));
+    let latest: { version: number; readings: Partial<Record<PrevBackfillField, number>> } | null =
+      null;
+    for (const r of rows) {
+      const nv = r.newValue as { readings?: unknown; version?: unknown } | null;
+      if (nv && typeof nv === 'object' && nv.readings && typeof nv.readings === 'object') {
+        const v = Number(nv.version ?? 0);
+        if (!latest || v > latest.version) {
+          latest = {
+            version: v,
+            readings: nv.readings as Partial<Record<PrevBackfillField, number>>,
+          };
+        }
+      }
+    }
+    return latest?.readings ?? null;
+  }
+
+  /**
+   * records 行 → TS 键值映射（resubmit 的重算 prev 源与标红重建入参）：与 readingsOf
+   * 同取数范围（板块 ≥1 存储列）、不同键空间（TS camelCase）——recalcDownstream 的
+   * prev getter 与 insertStatusAndHandoverAlertsInTx 的 values 均按 TS 键取值。
+   */
+  private rowValuesOf(row: typeof records.$inferSelect): Record<string, unknown> {
+    const values: Record<string, unknown> = {};
+    for (const def of FIELDS) {
+      if (def.section === 0) continue;
+      const key = recordKeyOf(def.name, this.logger);
+      if (!key) continue;
+      values[key] = row[key as keyof typeof row] ?? null;
+    }
+    return values;
+  }
+
+  /**
+   * 状态异常 + 交接事项标红行（契约 §4 第 4 步「生成标红确认行」的共用实现：TK-18 落地、
+   * TK-20 抽取供 resubmit 复用——电梯不一致行由各调用方按其核对数据源自行写入）：
+   * 状态字段=bad 逐字段一行（异常备注并入文案）、交接事项按 shared handoverItemsOf 拆条。
+   * 快照语义（先清后插）由调用方保证。
+   */
+  private async insertStatusAndHandoverAlertsInTx(
+    tx: DbExecutor,
+    recordId: number,
+    values: Readonly<Record<string, unknown>>,
+  ): Promise<void> {
+    for (const def of FIELDS) {
+      if (def.kind !== 'status') continue;
+      const key = recordKeyOf(def.name, this.logger);
+      if (!key || values[key] !== ABNORMAL_STATUS) continue;
+      const noteKey = recordKeyOf(
+        def.name.replace(/_status$/, '_note') as RecordFieldName,
+        this.logger,
+      );
+      const noteRaw = noteKey ? values[noteKey] : null;
+      const note = typeof noteRaw === 'string' ? noteRaw.trim() : '';
+      await tx.insert(alerts).values({
+        recordId,
+        ruleKey: `${def.name}_bad`,
+        target: `field:${def.name}`,
+        level: STATUS_ALERT_LEVEL,
+        message: `「${def.label}」填写为异常${note ? `：${note}` : ''}`.slice(0, 300),
+      });
+    }
+    const handoverItems = handoverItemsOf(values['handoverNote']);
+    for (const [i, item] of handoverItems.entries()) {
+      await tx.insert(alerts).values({
+        recordId,
+        ruleKey: 'handover_note',
+        target: 'field:handover_note',
+        level: HANDOVER_ALERT_LEVEL,
+        message: `交接事项 ${i + 1}：${item}`.slice(0, 300),
+      });
+    }
   }
 
   // ── 提交协议（TK-12：契约 §3.2 preview/submit、§4；F1-10、F2-01、DATA-05/07/09/10/13）─────
@@ -1063,10 +1717,18 @@ export class RecordsService {
   }
 
   /**
-   * 下游重算（TK-16，F3-08；在 submitCore 的事务内执行）：补交 D 日后，重算紧邻下游
-   * D+1 **已提交**记录的 prev 依赖用量——技术方案 §4.3 四类口径均只依赖紧邻上一班，
-   * 故重算范围恰为 D+1（水/电/气三项；液氧日间用量只取本班两时点、不依赖上一班，
-   * 不在重算范围）。下游无行或 draft（撤回重提时提交链路本就全量重算）→ 无事可做。
+   * 下游重算（TK-16，F3-08；在触发源的事务内执行）：上一班班次 D 的读数变化（补交晚到
+   * 或异议修改重提，TK-20）后，重算紧邻下游 D+1 **已提交**记录的 prev 依赖用量——
+   * 技术方案 §4.3 四类口径均只依赖紧邻上一班，故重算范围恰为 D+1（水/电/气三项；
+   * 液氧日间用量只取本班两时点、不依赖上一班，不在重算范围）。下游无行或 draft
+   * （待重提单，提交链路本就会全量重算）→ 无事可做。
+   *
+   * **行锁（TK-16 挂账闭环，契约订正 18 ⑧）**：下游行 SELECT ... FOR UPDATE 串行化——
+   * 并发两个触发源（补交/异议重提）同时重算同一 D+1 行时读-改-写不再互相覆盖。
+   *
+   * trigger 语境（TK-20 参数化）：late_backfill（补交）/ objection_resubmit（异议重提），
+   * 决定审计 reason 与 newValue 的复核检索键（后者沿用 late_backfill 的历史键名
+   * backfill_record_no，records-backfill.spec 断言锚点不变）。
    *
    * 豁免（D-T07）：当前版本被师傅手工覆盖的字段跳过——判定依据 = `record.usage_override`
    * 审计行按版本过滤（TK-13 评审 M1 钉死），与 F3-06-T1 manual 旗标同源。
@@ -1081,16 +1743,19 @@ export class RecordsService {
    */
   private async recalcDownstreamInTx(
     tx: DbExecutor,
-    backfillDutyDate: string,
-    backfilledValues: Readonly<Record<string, unknown>>,
+    sourceDutyDate: string,
+    sourceValues: Readonly<Record<string, unknown>>,
     actorId: number,
-    backfillRecordNo: string,
+    sourceRecordNo: string,
+    trigger: 'late_backfill' | 'objection_resubmit',
   ): Promise<RecalcResultDto | null> {
+    // 行锁（TK-16 挂账闭环）：FOR UPDATE 串行化并发重算的读-改-写
     const nextRows = await tx
       .select()
       .from(records)
-      .where(eq(records.dutyDate, plusOneDay(backfillDutyDate)))
-      .limit(1);
+      .where(eq(records.dutyDate, plusOneDay(sourceDutyDate)))
+      .limit(1)
+      .for('update');
     const next = nextRows[0];
     if (!next) return null;
     // **状态门控（评审修复轮 L2，2026-09-14 拍板）**：只重算 submitted。
@@ -1101,7 +1766,7 @@ export class RecordsService {
     // 这类晚到的下游单需人工处置（异议流程 TK-20 / 科长后台），故只留日志不改数。
     if (next.status !== 'submitted') {
       this.logger.warn(
-        `补交 ${backfillRecordNo} 的下游 ${next.recordNo}（${next.dutyDate}）处于 ` +
+        `重算触发源 ${sourceRecordNo}（${trigger}）的下游 ${next.recordNo}（${next.dutyDate}）处于 ` +
           `status=${next.status}，**不重算**（L2 拍板：不静默修改进确认/已归档单据的用量）；` +
           `如需修正该单数字，请走异议流程或科长后台处理`,
       );
@@ -1116,7 +1781,7 @@ export class RecordsService {
     };
     const prev: FieldValueGetter = (name) => {
       const key = recordKeyOf(name, this.logger);
-      return key ? (backfilledValues[key] ?? null) : null;
+      return key ? (sourceValues[key] ?? null) : null;
     };
     const usage = this.computeUsageValues(cur, prev, refilled);
 
@@ -1146,10 +1811,17 @@ export class RecordsService {
           field,
           value: newV,
           version: next.version,
-          trigger: 'late_backfill',
-          backfill_record_no: backfillRecordNo,
+          trigger,
+          // 复核检索键：late_backfill 沿用历史键名 backfill_record_no（records-backfill.spec
+          // 断言锚点不变），异议重提语境记 source_record_no（两类触发源各自检索）
+          ...(trigger === 'late_backfill'
+            ? { backfill_record_no: sourceRecordNo }
+            : { source_record_no: sourceRecordNo }),
         },
-        reason: '上一班记录晚到补交，自动重算',
+        reason:
+          trigger === 'late_backfill'
+            ? '上一班记录晚到补交，自动重算'
+            : '上一班异议修改重提，自动重算',
       });
       changed.push(field);
     }
@@ -1176,8 +1848,10 @@ export class RecordsService {
         newValue: {
           items: needsReview,
           version: next.version,
-          trigger: 'late_backfill',
-          backfill_record_no: backfillRecordNo,
+          trigger,
+          ...(trigger === 'late_backfill'
+            ? { backfill_record_no: sourceRecordNo }
+            : { source_record_no: sourceRecordNo }),
         },
         reason: '重算新基线命中防呆判定，未自动确认——请走异议流程人工核对',
       });
@@ -1675,194 +2349,180 @@ export class RecordsService {
 
     // 第 ⑤⑥ 步同事务：记录行（新建或撤回重提更新）+ 审计（补交再加晚到留痕与下游重算）
     let recalc: SubmitResultDto['recalc'] = null;
-    const saved = await this.db.transaction(async (tx) => {
-      let recordId: number;
-      if (existing) {
-        await tx
-          .update(records)
-          // 快照写 NULL（评审 M5）：字典存储列未上送的一律清空，撤回重提不残留服务端旧值；
-          // 提交人/接班人/状态/时刻/版本等记录级字段在后续键显式覆盖
-          .set({
-            ...SNAPSHOT_NULL_DEFAULTS,
-            ...values,
-            ...usage.values,
+    const saved = await this.db
+      .transaction(async (tx) => {
+        let recordId: number;
+        if (existing) {
+          await tx
+            .update(records)
+            // 快照写 NULL（评审 M5）：字典存储列未上送的一律清空，撤回重提不残留服务端旧值；
+            // 提交人/接班人/状态/时刻/版本等记录级字段在后续键显式覆盖
+            .set({
+              ...SNAPSHOT_NULL_DEFAULTS,
+              ...values,
+              ...usage.values,
+              submitterId: user.id,
+              receiverId,
+              receiverChangeReason: receiverChanged ? reason : null,
+              status: 'submitted',
+              submittedAt,
+              version,
+            })
+            .where(eq(records.id, existing.id));
+          recordId = existing.id;
+        } else {
+          const inserted = await tx.insert(records).values({
+            recordNo,
+            dutyDate,
             submitterId: user.id,
             receiverId,
             receiverChangeReason: receiverChanged ? reason : null,
             status: 'submitted',
             submittedAt,
             version,
-          })
-          .where(eq(records.id, existing.id));
-        recordId = existing.id;
-      } else {
-        const inserted = await tx.insert(records).values({
-          recordNo,
-          dutyDate,
-          submitterId: user.id,
-          receiverId,
-          receiverChangeReason: receiverChanged ? reason : null,
-          status: 'submitted',
-          submittedAt,
-          version,
-          ...values,
-          ...usage.values,
-        });
-        recordId = inserted[0].insertId;
-      }
-
-      // 电梯核对明细与标红（TK-17，D-T22）：快照语义——重提（撤回/补交接管 draft）先清后插，
-      // 核对以本次提交为准；expected 为服务端按 check_time 重算值（ELE-05「锁定核对时刻」：
-      // 提交/重提时刻不参与计算，D-P16）；任一不一致写 alerts 标红行（ELE-06，level=mid：
-      // Phase 1 标红 + 必填说明，P2 转中预警推送；契约 §4 第 4 步「电梯不一致」）。
-      // 核对不强制：未上送或空数组 = 本班次未核对，无明细行也无标红（追责载体为逐条知晓）
-      // L3（评审修复轮）：alerts 与明细行**同一快照语义**——原只清 elevator_checks，重提时
-      // 旧标红行会累积（同一条不一致重复入行、已不成立的旧项残留），接班人逐条知晓（TK-19）
-      // 会看到重复/过期标红项。标红确认行由本提交事务生成（契约 §4 第 4 步），故重建也在此：
-      // 后续若新增其它来源的 alerts 写入方，需按其主权环节同步调整本处范围
-      await tx.delete(elevatorChecks).where(eq(elevatorChecks.recordId, recordId));
-      await tx.delete(alerts).where(eq(alerts.recordId, recordId));
-      for (const c of elevatorCheck.valid) {
-        await tx.insert(elevatorChecks).values({
-          recordId,
-          elevatorId: c.elevator_id,
-          checkTime: c.check_time,
-          expected: c.expected,
-          actual: c.actual,
-          explanation: c.explanation,
-        });
-        if (isMismatchOf(c.actual)) {
-          const name = elevatorCheck.plans?.get(c.elevator_id)?.name ?? `电梯#${c.elevator_id}`;
-          const message =
-            `${name} 预期${elevatorExpectedLabel(c.expected)}、实际${elevatorActualLabel(c.actual)}` +
-            (c.explanation ? `：${c.explanation}` : '');
-          await tx.insert(alerts).values({
-            recordId,
-            ruleKey: 'elevator_mismatch',
-            target: `elevator:${c.elevator_id}`,
-            level: ELEVATOR_ALERT_LEVEL,
-            message: message.slice(0, 300),
+            ...values,
+            ...usage.values,
           });
+          recordId = inserted[0].insertId;
         }
-      }
 
-      // 状态异常标红行（TK-18，契约 §4 第 4 步「生成标红确认行」的补全，技术方案 §5.3/DEP-08）：
-      // 状态字段=bad 逐字段一行，rule_key/target 形态与种子 D-1 配套标红行同形
-      // （`{field}_bad` / `field:{field}`，shared alerts.ts 单一口径），level=high
-      // （PRD §6.4 预警规则表「状态=异常 → 高」的 Phase 1 标红过渡，DEP-07）；异常备注
-      // 有内容时并入文案（可解释原则：文案含命中规则与现状）。快照语义：上方已整单清空
-      // alerts，撤回/异议重提按本次提交重建，旧标红不残留。
-      for (const def of FIELDS) {
-        if (def.kind !== 'status') continue;
-        const key = recordKeyOf(def.name, this.logger);
-        if (!key || values[key] !== ABNORMAL_STATUS) continue;
-        // 状态字段与异常备注在字典中成对（`*_status` → `*_note`：hp_status→hp_note 等，附录 A）；
-        // 备注缺失不拦（动态必填由校验层保证，此处仅文案取值）
-        const noteKey = recordKeyOf(
-          def.name.replace(/_status$/, '_note') as RecordFieldName,
-          this.logger,
-        );
-        const noteRaw = noteKey ? values[noteKey] : null;
-        const note = typeof noteRaw === 'string' ? noteRaw.trim() : '';
-        await tx.insert(alerts).values({
-          recordId,
-          ruleKey: `${def.name}_bad`,
-          target: `field:${def.name}`,
-          level: STATUS_ALERT_LEVEL,
-          message: `「${def.label}」填写为异常${note ? `：${note}` : ''}`.slice(0, 300),
-        });
-      }
-      // 交接事项拆条（TK-18，DATA-08/技术方案 §5.3「按条拆分——以换行或编号分条」）：
-      // 板块十有内容时拆为多条确认行（拆条纯函数 shared handoverItemsOf，逐条知晓 TK-19），
-      // level=low（提示性质，非异常）
-      const handoverItems = handoverItemsOf(values['handoverNote']);
-      for (const [i, item] of handoverItems.entries()) {
-        await tx.insert(alerts).values({
-          recordId,
-          ruleKey: 'handover_note',
-          target: 'field:handover_note',
-          level: HANDOVER_ALERT_LEVEL,
-          message: `交接事项 ${i + 1}：${item}`.slice(0, 300),
-        });
-      }
+        // 电梯核对明细与标红（TK-17，D-T22）：快照语义——重提（撤回/补交接管 draft）先清后插，
+        // 核对以本次提交为准；expected 为服务端按 check_time 重算值（ELE-05「锁定核对时刻」：
+        // 提交/重提时刻不参与计算，D-P16）；任一不一致写 alerts 标红行（ELE-06，level=mid：
+        // Phase 1 标红 + 必填说明，P2 转中预警推送；契约 §4 第 4 步「电梯不一致」）。
+        // 核对不强制：未上送或空数组 = 本班次未核对，无明细行也无标红（追责载体为逐条知晓）
+        // L3（评审修复轮）：alerts 与明细行**同一快照语义**——原只清 elevator_checks，重提时
+        // 旧标红行会累积（同一条不一致重复入行、已不成立的旧项残留），接班人逐条知晓（TK-19）
+        // 会看到重复/过期标红项。标红确认行由本提交事务生成（契约 §4 第 4 步），故重建也在此：
+        // 后续若新增其它来源的 alerts 写入方，需按其主权环节同步调整本处范围
+        await tx.delete(elevatorChecks).where(eq(elevatorChecks.recordId, recordId));
+        await tx.delete(alerts).where(eq(alerts.recordId, recordId));
+        for (const c of elevatorCheck.valid) {
+          await tx.insert(elevatorChecks).values({
+            recordId,
+            elevatorId: c.elevator_id,
+            checkTime: c.check_time,
+            expected: c.expected,
+            actual: c.actual,
+            explanation: c.explanation,
+          });
+          if (isMismatchOf(c.actual)) {
+            const name = elevatorCheck.plans?.get(c.elevator_id)?.name ?? `电梯#${c.elevator_id}`;
+            const message =
+              `${name} 预期${elevatorExpectedLabel(c.expected)}、实际${elevatorActualLabel(c.actual)}` +
+              (c.explanation ? `：${c.explanation}` : '');
+            await tx.insert(alerts).values({
+              recordId,
+              ruleKey: 'elevator_mismatch',
+              target: `elevator:${c.elevator_id}`,
+              level: ELEVATOR_ALERT_LEVEL,
+              message: message.slice(0, 300),
+            });
+          }
+        }
 
-      // 审计（契约 §5：action=record.submit；接班人修改原因记 reason 列，DATA-10 留痕）
-      await tx.insert(auditLogs).values({
-        actorId: user.id,
-        action: 'record.submit',
-        targetType: 'record',
-        targetId: recordNo,
-        reason: receiverChanged
-          ? `接班人改为 ${receiverName ?? payload.receiver_id}：${reason}`
-          : null,
-        newValue: { receiver_id: receiverId, receiver_changed: receiverChanged, version },
-      });
+        // 状态异常标红行 + 交接事项拆条（TK-18 落地、TK-20 抽取为 insertStatusAndHandoverAlertsInTx
+        // 供 resubmit 复用——rule_key/target 形态与种子 D-1 配套标红行同形，
+        // `{field}_bad` / `field:{field}`、level=high/low；快照语义：上方已整单清空 alerts，
+        // 撤回/异议重提按本次提交重建，旧标红不残留）
+        await this.insertStatusAndHandoverAlertsInTx(tx, recordId, values);
 
-      // 用量覆盖留痕（F3-04-T2/F3-06）：逐覆盖项一行，原因记 reason 列（技术方案 §5.5），
-      // oldValue 记覆盖前服务端算出的自动值——留痕即 F3-06-T1「人工值」标识的数据源，
-      // 亦为 TK-16 重算豁免（师傅手工覆盖过的值不被重算覆盖）的判定依据
-      for (const o of overrides.applied) {
-        await tx.insert(auditLogs).values({
-          actorId: user.id,
-          action: 'record.usage_override',
-          targetType: 'record',
-          targetId: recordNo,
-          oldValue: { field: o.field, auto_value: o.auto },
-          newValue: { field: o.field, value: o.value, version },
-          reason: o.reason,
-        });
-      }
-
-      // 防呆确认留痕（TK-14，契约 §5「record.submit + 各确认原因」）：逐确认项一行，
-      // 原因记 reason 列，newValue 记命中项的上一班/本次值与版本（复核口径：确认的是
-      // 「当时看到什么」；仅命中项入账，confirmAudits 构造处已过滤未命中的确认）
-      for (const c of confirmAudits) {
+        // 审计（契约 §5：action=record.submit；接班人修改原因记 reason 列，DATA-10 留痕）
         await tx.insert(auditLogs).values({
           actorId: user.id,
           action: 'record.submit',
           targetType: 'record',
           targetId: recordNo,
-          newValue:
-            c.card === null
-              ? { type: c.type, field: c.field, prev: c.prev, current: c.current, version }
-              : { type: c.type, card: c.card, prev: c.prev, current: c.current, version },
-          reason: c.reason,
+          reason: receiverChanged
+            ? `接班人改为 ${receiverName ?? payload.receiver_id}：${reason}`
+            : null,
+          newValue: { receiver_id: receiverId, receiver_changed: receiverChanged, version },
         });
-      }
 
-      // 补录留痕（TK-14，F3-07/D-T19）：补录读数不落 records 列（缺失班次不建行，
-      // F6-06 漏交检测不受影响），审计存全量补录值供台账与双轨比对核对
-      if (backfill) {
-        await tx.insert(auditLogs).values({
-          actorId: user.id,
-          action: 'record.prev_backfill',
-          targetType: 'record',
-          targetId: recordNo,
-          newValue: { readings: backfill, version },
-        });
-      }
+        // 用量覆盖留痕（F3-04-T2/F3-06）：逐覆盖项一行，原因记 reason 列（技术方案 §5.5），
+        // oldValue 记覆盖前服务端算出的自动值——留痕即 F3-06-T1「人工值」标识的数据源，
+        // 亦为 TK-16 重算豁免（师傅手工覆盖过的值不被重算覆盖）的判定依据
+        for (const o of overrides.applied) {
+          await tx.insert(auditLogs).values({
+            actorId: user.id,
+            action: 'record.usage_override',
+            targetType: 'record',
+            targetId: recordNo,
+            oldValue: { field: o.field, auto_value: o.auto },
+            newValue: { field: o.field, value: o.value, version },
+            reason: o.reason,
+          });
+        }
 
-      // 晚到补交留痕与下游重算（TK-16/F3-08，D-T21）：补交本体即 record.submit（上方），
-      // 本行补记晚到语境；F6-06 漏交检测以 records 行存在为准，该日自此不再计漏交。
-      // 重算在同事务内执行——补交行与下游重算同生共死，防「补交成功、重算失败」半态
-      if (opts.late) {
-        await tx.insert(auditLogs).values({
-          actorId: user.id,
-          action: 'record.late_submit',
-          targetType: 'record',
-          targetId: recordNo,
-          newValue: {
-            duty_date: dutyDate,
-            version,
-            // draft 接管（L5）：显式记接管前的提交人，归属变更 A→B 不靠两条审计的 actor 间接推断
-            ...(existing ? { prev_submitter_id: existing.submitterId } : {}),
-          },
-          reason: '上一班记录晚到，跨班次补交',
-        });
-        recalc = await this.recalcDownstreamInTx(tx, dutyDate, values, user.id, recordNo);
-      }
-      return recordId;
-    });
+        // 防呆确认留痕（TK-14，契约 §5「record.submit + 各确认原因」）：逐确认项一行，
+        // 原因记 reason 列，newValue 记命中项的上一班/本次值与版本（复核口径：确认的是
+        // 「当时看到什么」；仅命中项入账，confirmAudits 构造处已过滤未命中的确认）
+        for (const c of confirmAudits) {
+          await tx.insert(auditLogs).values({
+            actorId: user.id,
+            action: 'record.submit',
+            targetType: 'record',
+            targetId: recordNo,
+            newValue:
+              c.card === null
+                ? { type: c.type, field: c.field, prev: c.prev, current: c.current, version }
+                : { type: c.type, card: c.card, prev: c.prev, current: c.current, version },
+            reason: c.reason,
+          });
+        }
+
+        // 补录留痕（TK-14，F3-07/D-T19）：补录读数不落 records 列（缺失班次不建行，
+        // F6-06 漏交检测不受影响），审计存全量补录值供台账与双轨比对核对
+        if (backfill) {
+          await tx.insert(auditLogs).values({
+            actorId: user.id,
+            action: 'record.prev_backfill',
+            targetType: 'record',
+            targetId: recordNo,
+            newValue: { readings: backfill, version },
+          });
+        }
+
+        // 晚到补交留痕与下游重算（TK-16/F3-08，D-T21）：补交本体即 record.submit（上方），
+        // 本行补记晚到语境；F6-06 漏交检测以 records 行存在为准，该日自此不再计漏交。
+        // 重算在同事务内执行——补交行与下游重算同生共死，防「补交成功、重算失败」半态
+        if (opts.late) {
+          await tx.insert(auditLogs).values({
+            actorId: user.id,
+            action: 'record.late_submit',
+            targetType: 'record',
+            targetId: recordNo,
+            newValue: {
+              duty_date: dutyDate,
+              version,
+              // draft 接管（L5）：显式记接管前的提交人，归属变更 A→B 不靠两条审计的 actor 间接推断
+              ...(existing ? { prev_submitter_id: existing.submitterId } : {}),
+            },
+            reason: '上一班记录晚到，跨班次补交',
+          });
+          recalc = await this.recalcDownstreamInTx(
+            tx,
+            dutyDate,
+            values,
+            user.id,
+            recordNo,
+            'late_backfill',
+          );
+        }
+        return recordId;
+      })
+      // 1062→409 归一（TK-16 挂账闭环，契约订正 18 ⑧）：existing 预检与 INSERT 之间的
+      // 并发窗口撞 duty_date/record_no UNIQUE（MySQL 1062 → 500），按 RECORD_EXISTS
+      // 409 语义归一（与 recalc 下游行锁同批补齐）
+      .catch((e: unknown) => {
+        if (isDuplicateEntryError(e)) {
+          throw new ApiException(
+            'RECORD_EXISTS',
+            opts.late ? '该班次记录已存在，不可重复补交' : '当日记录已提交，不可重复提交',
+          );
+        }
+        throw e;
+      });
 
     return {
       id: saved,
