@@ -687,3 +687,20 @@ export interface NotificationReadResultDto {
   id: number;
   read_at: string;
 }
+
+// ── 契约 §3.6 GET /admin/missing-submits（应提交未提交视图；F6-06；TK-23）─────────
+
+/** 应提交未提交视图行：漏交班次的日期与排班人（与 missing_submit 通知同源判定，TK-22） */
+export interface MissingSubmitItemDto {
+  /** 排班日（班次起始日，C-08）；同 missing_submit 通知 title 的日期部分 */
+  duty_date: string;
+  /** 排班师傅用户 id */
+  user_id: number;
+  /** 排班师傅姓名（通知 message 的排班人同源） */
+  real_name: string;
+}
+
+/** GET /admin/missing-submits 响应体：当前仍构成漏交的班次集合（duty_date 倒序，最近在前） */
+export interface MissingSubmitListDto {
+  items: readonly MissingSubmitItemDto[];
+}
