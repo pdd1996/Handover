@@ -375,6 +375,8 @@ CREATE TABLE audit_logs (
 
 **撤回窗口（总务科 2026-08-28 拍板）**：提交后 10 分钟内、且接班人尚未确认时，交班人可单方撤回，交接单回到可编辑状态，接班人端待确认入口同步消失；撤回动作写 audit_logs，重新提交版本号+1。服务端校验三个不可撤回条件：超过 10 分钟窗口、接班人已完成确认、交接单处于"有异议"状态。实现要点：撤回是服务端操作（记录已在服务器），需在院内网络下执行；接班人确认的 2 小时计时在撤回后随重提重新起算。不影响表结构。
 
+**实现落点（TK-22，修订 28）——服务端定时任务四件**（notifications 模块，扫描的 `now` 一律由调用方**注入**；生产由 @nestjs/schedule（§2 选型「官方定时任务」）按间隔喂系统时钟，测试直调扫描本体；jest 环境调度静默）：① **F2-11 确认超时**（每 5 分钟）：status='submitted' 且 submitted_at + configs `confirm_due_hours`（默认 2，限 1–72）已过 → notifications 落 confirm_due 提醒接班人；去重键 (record, receiver) 带 submitted_at 水位（撤回重提刷新窗口后旧提醒不压制；notifications.createdAt 系库端 CURRENT_TIMESTAMP 的 UTC 串，与 records 列 localMeasuredAt 本地墙钟串比较经 shared `localTimestampToDate` 换算）；② **F2-12 异议升级**（每 30 分钟）：status='objection' 且 objection_at + configs `objection_escalate_hours`（默认 24，限 1–168）已过 → **escalated_at 原子闸门**（UPDATE … WHERE escalated_at IS NULL，命中 1 行才发通知，防重复提醒的并发安全实现）+ 提醒全部 active 科长；③ **F6-06 漏交扫描**（每 30 分钟）：排班日 D 过（D+1）日 configs `missing_submit_deadline`（默认 09:00）仍无 records 行 → 提醒科长（title 含日期、message 含排班人）；漏交判定以 records 行存在为准（台账增补 #27）；**扫描窗口 = 当前班次 − `backfill_window_days`**（窗口外无法补交不再提醒，与 §4.3 补交端点同源取值）；截止判定在**墙钟空间**（duty-date.ts `localWallClock`，(D+1) 日 'HH:MM' 与当地墙钟直接比较，不反推 Date）；④ **会话过期清理**（每 60 分钟，§6）：DELETE sessions WHERE expires_at ≤ now（UTC 串口径）。通知落 notifications 表不经审计拦截器（非用户变更类路由，契约 §5 审计联动表不含定时任务）；读侧 GET /notifications + POST /notifications/{id}/read 见契约 §3.5（TK-22）。
+
 ### 5.5 审计与留痕
 
 NestJS 全局拦截器统一记录：配置中心任何修改（新旧值）、排班/电梯字典/点位字典修改、账号开通与停用、记录数据覆盖（谁、何时、哪些字段）、防呆/充气/覆盖确认（原因记 reason 列）、登录事件（设备、IP）。审计日志只增不改不删，是考核与追责的数据基础。
@@ -444,3 +446,5 @@ PRD v0.2.5 中全部 Given/When/Then 验收标准（含撤回窗口、排班安�
 ---
 
 *本文档 v0.1 已获总务科确认，v0.2 为数据库设计评审修订、待复核。与 PRD 一样：只保留最新版，修订史内嵌本节。*
+
+28. **定时任务四件落地口径（2026-09-16）**：TK-22 实现服务端定时任务（F2-11/F2-12/F6-06 + 会话清理）——§5.4 末新增「实现落点（TK-22）」段（四扫描的时间注入设计、间隔、去重键、F6-06 墙钟空间截止判定与补交窗口对齐的扫描窗口、sessions UTC 串与 records 本地墙钟串两套口径各随其列）；§5.4 异议升级句的「定时任务扫描，升级后记 escalated_at 防重复提醒」自此有实现对应（escalated_at 原子闸门）；§2 选型表的「官方定时任务」落为 @nestjs/schedule（ScheduleModule.forRoot()，notifications.scheduler.ts 按 5/30/30/60 分钟喂系统时钟，jest 环境静默）。无表结构变更（notifications/sessions 两表 §4.2 已有），无新增配置键（confirm_due_hours / objection_escalate_hours / missing_submit_deadline / session_timeout_minutes 种子已有）。联动：契约订正 26、台账增补 #36、任务分解修订 39。
