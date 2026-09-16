@@ -23,6 +23,7 @@ import type {
   SubmitResultDto,
   TodayDto,
   UserRole,
+  WithdrawResultDto,
 } from '@handover/shared';
 
 const BASE = '/api/v1';
@@ -129,6 +130,15 @@ export const api = {
   /** POST /records/today/submit —— 正式提交（F2-01：生成正式交接单，TK-12） */
   submit(payload: SubmitPayloadDto): Promise<SubmitResultDto> {
     return http('/records/today/submit', { method: 'POST', body: JSON.stringify(payload) });
+  },
+
+  /**
+   * POST /records/today/withdraw —— 撤回（TK-21，F2-08/F2-09/F2-10）：交班人提交后窗口内
+   * 单方撤回本班次交接单回到可编辑（转 draft）。服务端校三不可撤条件，失败 409
+   * WITHDRAW_NOT_ALLOWED（携 reason：WINDOW_EXPIRED/ALREADY_CONFIRMED/IN_OBJECTION，提示走异议流程）。
+   */
+  withdraw(): Promise<WithdrawResultDto> {
+    return http('/records/today/withdraw', { method: 'POST' });
   },
 
   /** GET /records/pending —— 待确认列表（F2-02「有 N 份交接单待确认」，TK-18；仅 master） */

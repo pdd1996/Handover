@@ -900,6 +900,34 @@ async function onConfirmCancel(): Promise<void> {
   await loadToday();
 }
 
+/**
+ * 撤回（TK-21，F2-08/F2-09）：交班人提交后窗口内单方撤回本班次交接单回到可编辑。
+ * 成功 → 状态转 draft（loadToday 后提交入口重现，TodayView canSubmit && status==='draft'）、
+ * 待确认入口同步消失（F2-09-T2）；失败 409 WITHDRAW_NOT_ALLOWED → notify 显服务端文案
+ * （含「请走异议流程」，reason 由服务端按三条件给出，C-09）。撤回是写操作，同步在途不接受
+ * （与 openCard/onOpenPreview 同门）；409 后重取首页（状态可能已被接班人确认/异议改变）。
+ */
+const withdrawing = ref(false);
+async function onWithdraw(): Promise<void> {
+  if (withdrawing.value) return;
+  if (syncing.value) {
+    showToast('正在同步，请稍候');
+    return;
+  }
+  withdrawing.value = true;
+  try {
+    const result = await api.withdraw();
+    showToast(`已撤回，交接单 ${result.record_no} 回到可编辑状态`);
+    await loadToday(); // 重取汇总：状态转 draft、提交入口重现、待确认入口同步消失（F2-09）
+  } catch (err) {
+    notify(err); // 409 WITHDRAW_NOT_ALLOWED 用服务端文案；401 并入 handleSessionLoss
+    // 状态可能已变（窗口内被接班人确认/标注异议），重取首页反映真实状态
+    if (err instanceof ApiRequestError && err.status === 409) await loadToday();
+  } finally {
+    withdrawing.value = false;
+  }
+}
+
 onMounted(bootstrap);
 
 // F1-06「恢复网络自动上传」：系统联网事件触发排空（静默模式——自动触发不弹
@@ -1031,10 +1059,12 @@ watch(
       :queue-count="queueItems.length"
       :syncing="syncing"
       :pending-count="pendingItems.length"
+      :withdrawing="withdrawing"
       @open="openCard"
       @submit="onOpenPreview"
       @sync="drainQueue"
       @confirm="openConfirm"
+      @withdraw="onWithdraw"
     />
     <div v-else class="flex min-h-screen items-center justify-center bg-slate-100">
       <van-loading v-if="loadingToday" size="24" vertical>加载今日交接…</van-loading>

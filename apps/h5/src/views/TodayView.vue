@@ -10,11 +10,12 @@
  *   用 shared `computeCardBadge`（与 api 同一函数）对「本地草稿 ?? 服务端值」合并取值重算，
  *   填写后返回首页角标/进度条立即反映，无需重新拉接口；字段值无草稿时结果与接口响应一致
  */
-import { computed } from 'vue';
+import { computed, onUnmounted, ref, watch } from 'vue';
 import {
   CARD_BY_KEY,
   computeCardBadge,
   isFilledValue,
+  localTimestampToDate,
   tankInUseOf,
   type BadgeDto,
   type CardDto,
@@ -38,6 +39,8 @@ const props = defineProps<{
   syncing?: boolean;
   /** 待确认交接单数（TK-18，F2-02；GET /records/pending，仅 master 拉取） */
   pendingCount?: number;
+  /** 撤回请求在途（TK-21，F2-08）：撤回按钮 loading 与防重点 */
+  withdrawing?: boolean;
 }>();
 defineEmits<{
   (e: 'open', key: string): void;
@@ -45,6 +48,8 @@ defineEmits<{
   (e: 'sync'): void;
   /** 打开待确认入口（TK-18，F2-02） */
   (e: 'confirm'): void;
+  /** 撤回本班次交接单（TK-21，F2-08） */
+  (e: 'withdraw'): void;
 }>();
 
 const { getValue: getDraft } = useDraft();
@@ -160,6 +165,69 @@ const syncText = computed(() => {
   if (props.syncing) return '同步中…';
   return props.today.pending_sync || props.pendingSync ? '待同步' : '已同步';
 });
+
+/**
+ * 撤回倒计时（TK-21，F2-09-T1「提交后查看撤回入口 → 显示剩余倒计时」）：
+ * 仅当记录为 submitted 且提交了 submitted_at 时才有截止时刻（= submitted_at + 窗口分钟）。
+ * 窗口值取接口回传的 withdraw_window_minutes（服务端读 configs，与撤回校验同源，F4-11）；
+ * 解析用 shared localTimestampToDate（与 api 撤回窗口判定同一实现，三端同源）。
+ * 每秒 tick 一个 nowMs，到期后 canWithdraw 转 false、按钮自动消失（服务端仍会权威复校）。
+ */
+const nowMs = ref(Date.now());
+let withdrawTimer: ReturnType<typeof setInterval> | null = null;
+
+function stopWithdrawTimer(): void {
+  if (withdrawTimer !== null) {
+    clearInterval(withdrawTimer);
+    withdrawTimer = null;
+  }
+}
+
+/** 撤回截止时刻（本地毫秒）；非 submitted/无 submitted_at/无法解析 → null（不起倒计时） */
+const withdrawDeadlineMs = computed<number | null>(() => {
+  const rec = props.today.record;
+  if (!rec || rec.status !== 'submitted' || !rec.submitted_at) return null;
+  const submitted = localTimestampToDate(rec.submitted_at);
+  if (!submitted) return null;
+  const win = props.today.withdraw_window_minutes;
+  if (!Number.isFinite(win) || win <= 0) return null;
+  return submitted.getTime() + win * 60000;
+});
+
+/** 剩余秒数（≥0）；无截止时刻为 0 */
+const withdrawRemainSec = computed(() => {
+  const dl = withdrawDeadlineMs.value;
+  if (dl === null) return 0;
+  return Math.max(0, Math.floor((dl - nowMs.value) / 1000));
+});
+
+/** 可撤回：师傅本人（canSubmit）+ 窗口内（剩余 > 0）——与提交入口互斥（submitted vs draft/无） */
+const canWithdraw = computed(() => Boolean(props.canSubmit) && withdrawRemainSec.value > 0);
+
+/** 倒计时文案 mm:ss（F2-09-T1「倒计时与窗口一致」） */
+const withdrawCountdownText = computed(() => {
+  const s = withdrawRemainSec.value;
+  const mm = String(Math.floor(s / 60)).padStart(2, '0');
+  const ss = String(s % 60).padStart(2, '0');
+  return `${mm}:${ss}`;
+});
+
+// 截止时刻出现/变化时重启计时器（提交后 loadToday 刷新 today → deadline 出现）；到期自停。
+// immediate 覆盖首屏即处于 submitted 窗口内的场景（刷新页面恢复）
+watch(
+  withdrawDeadlineMs,
+  (dl) => {
+    stopWithdrawTimer();
+    if (dl === null) return;
+    nowMs.value = Date.now();
+    withdrawTimer = setInterval(() => {
+      nowMs.value = Date.now();
+      if (nowMs.value >= (withdrawDeadlineMs.value ?? Infinity)) stopWithdrawTimer();
+    }, 1000);
+  },
+  { immediate: true },
+);
+onUnmounted(stopWithdrawTimer);
 </script>
 
 <template>
@@ -282,6 +350,26 @@ const syncText = computed(() => {
               ? '正在同步待同步队列，请稍候…'
               : '提交前先预览未填项与异常项，提交后生成本班次正式交接单'
           }}
+        </div>
+      </div>
+
+      <!-- 撤回入口（TK-21，F2-08/F2-09）：提交后窗口内显示，带剩余倒计时（mm:ss）；
+           与提交入口互斥（submitted vs draft/无）。点击撤回回到可编辑，接班人端入口同步消失。
+           窗口过期/已确认/有异议时服务端 409 拒绝并提示走异议流程（按钮到期自动隐藏） -->
+      <div v-if="canWithdraw" class="mt-5">
+        <van-button
+          block
+          type="warning"
+          :loading="withdrawing"
+          data-testid="withdraw-open"
+          @click="$emit('withdraw')"
+        >
+          撤回修改（{{ withdrawCountdownText }}）
+        </van-button>
+        <div class="mt-1.5 text-center text-xs text-slate-400" data-testid="withdraw-hint">
+          提交后 {{ today.withdraw_window_minutes }} 分钟内可撤回重改，剩余
+          <b class="text-amber-600" data-testid="withdraw-countdown">{{ withdrawCountdownText }}</b>
+          ；超时或接班人确认后需走异议流程
         </div>
       </div>
     </div>
