@@ -30,6 +30,7 @@
     { "field": "hp_status", "section": 2, "label": "高配房是否正常", "anchor": "#sec-2-hp-status" }
   ],
   "need_confirm": null,
+  "reason": null,
   "request_id": "req-xxxx"
 }
 ```
@@ -37,6 +38,7 @@
 - `code`：机器可读错误码（见 §3 错误码表）
 - `missing_fields[]`：**缺失/越界字段逐条点名**——`field` 点名对象（records 列名；**电梯核对行为 `elevator:{id}`**，因明细落 `elevator_checks` 逐台一行、records 无对应列，而 ELE-04/ELE-07 同受 C-09「所有拦截逐条点名 + 点击跳转定位」约束）、`section` 板块序（0=基础信息，1~10=业务板块，电梯为 9）、`label` 中文名、`anchor` 前端跳转锚点（生成式 `#sec-{板块号}-{field 的 kebab 形式}`，`_` 与 `:` 均转 `-`）；无缺失类错误时为 `null`
 - `need_confirm`：防呆/安全阀需确认时为确认对象（见 §4 提交协议），否则 `null`
+- `reason`：**不可撤回原因**（TK-21 订正 25 升为响应字段）——仅 `WITHDRAW_NOT_ALLOWED` 使用，取 `WINDOW_EXPIRED` / `ALREADY_CONFIRMED` / `IN_OBJECTION` 三值之一（机器可读，供客户端按原因分支提示与 F2-10-T1/T2/T3 用例逐条断言）；其余错误码恒为 `null`
 - `request_id`：日志追踪
 
 **用例断言口径**：C-09 相关用例（F1-08-T1、F1-08-T2 等）断言"缺失字段清单完整 + anchor 可达 + 提示逐条点名"。
@@ -53,7 +55,7 @@
 | 409 | READINGS_DECREASED | 读数小于上一班，需确认 | F1-12 |
 | 409 | GAS_REFILL_CONFIRMED | 气卡剩余量增大，需充气确认 | F1-13 |
 | 409 | DUTY_MISMATCH | 登录人与当日排班不符，需安全阀确认 | F6-05 |
-| 409 | WITHDRAW_NOT_ALLOWED | 不可撤回（`reason`: WINDOW_EXPIRED / ALREADY_CONFIRMED / IN_OBJECTION） | F2-10 |
+| 409 | WITHDRAW_NOT_ALLOWED | 不可撤回（响应体 `reason` 字段：WINDOW_EXPIRED / ALREADY_CONFIRMED / IN_OBJECTION，订正 25） | F2-10 |
 | 409 | CONFIRM_INCOMPLETE | 仍有未逐条知晓的标红项/交接事项 | F2-04 |
 | 409 | OVERRIDE_REASON_REQUIRED | 覆盖自动计算值未填原因 | F3-06 |
 | 409 | ELEVATOR_EXPLANATION_REQUIRED | 电梯不一致未填说明（`missing_fields[].field` 以 `elevator:{id}` 点名，section=9） | ELE-04、ELE-07 |
@@ -75,14 +77,14 @@
 
 | 方法与路径 | 角色 | 用途 | 关联规格 | 契约要点 |
 | --- | --- | --- | --- | --- |
-| GET `/records/today` | master,chief | 首页卡片汇总 | F1-01、F1-02、F1-03 | 返回各板块填写状态、角标统计、今日记录状态、待同步标记；接班人按**次日排班**自动带出（F2-01/DATA-10，TK-12） |
+| GET `/records/today` | master,chief | 首页卡片汇总 | F1-01、F1-02、F1-03 | 返回各板块填写状态、角标统计、今日记录状态、待同步标记；接班人按**次日排班**自动带出（F2-01/DATA-10，TK-12）；**回传 `withdraw_window_minutes`**（TK-21 订正 25：服务端读 configs `withdraw_window_minutes`、非法/缺失回落 10，供前端据 `record.submitted_at + 本值` 算撤回倒计时，F2-09-T1；与撤回校验同源，权威形状 shared `TodayDto`） |
 | GET `/records/today/prev` | master,chief | 上一班读数带出 | F1-05、DATA-02 | 按 duty_date 取**相邻班次**（今日班次日期 − 1 天，D-T17）**已提交**记录；含液氧昨日 20:30 值；相邻日无行（漏交）或为 draft → `prev: null` 且非首班（F3-07 缺失态）；今日之前无任何记录 → `first_day: true`（F1-15）；**不回落更早记录** |
 | GET `/records/today/draft` | master | 读取在线草稿 | F1-09 | **暂缓实现（D-T18）**：草稿层为客户端 IndexedDB（技术方案 §5.1），服务端不设在线草稿读写；跨设备续填需求出现时再评估恢复本路由 |
 | PUT `/records/today/draft` | master | 保存草稿（局部） | F1-09 | **暂缓实现（D-T18）**：同上；records 行提交时一次性创建，draft 状态仅由撤回（F2-08，TK-21）产生 |
 | POST `/records/today/preview` | master | 提交前预览 | F1-10 | 返回未填项清单与异常项清单（结构同 `missing_fields`，C-09 逐条点名+锚点）；权威形状 shared `PreviewDto`（TK-12 落地：接班人修改原因条件预检一并点名；只读不落库） |
 | POST `/records/today/submit` | master | 正式提交 | F1-01、F1-07、F2-01、DATA-09、DATA-10 | 详见 §4 提交协议（TK-12 落地：record_no=`HB-YYYYMMDD-001`、submitted_at=服务端收到时刻、接班人=次日排班带出/修改必填原因留痕；防呆 409 已随 TK-14 落地（订正 15）、用量固化已随 TK-13、duty_guard 判定随 TK-26；提交链路角色 master，不适用 chief 只读回写口径） |
 | POST `/records/backfill` | master,chief | 跨班次补交（上一班晚到） | F3-08、F1-01 | 决策记录 **D-T21**（TK-16）：payload `duty_date` 显式上送（日历合法、**严格早于当前班次日期**、且**不早于补交窗口**：当前班次 − configs `backfill_window_days` 天，种子 7、❓ 待科长确认），其余请求体与 submit 同形；校验/防呆/覆盖/补录协议与 §4 完全同口径（submitCore 单一实现）；**该班次已有非 draft 记录 → 409 RECORD_EXISTS；draft 行（撤回后未重提）由补交接管为「更新 + version+1」**（否则与「submit 只认当前班次」合起来构成永久死角）；提交人恒为登录人本人（科长代录他人挂 TK-24）；补交成功后同事务触发下游重算（F3-08：**仅紧邻 D+1 且 status='submitted' 的记录**——objection/completed 已进确认或已签名归档，**不静默改数**；water/e/gas 三项 prev 依赖用量；手工覆盖豁免 D-T07；**按数值而非字符串判等**，值无变化不写审计），响应带 `recalc`（权威形状 shared dto `RecalcResultDto`；无变更且无待复核项时为 null；新基线命中防呆判定时**不改数不拦提交**、标 `needs_review`）；审计 `record.late_submit` + 逐变更项 `record.recalc` + 命中时 `record.recalc_review`（§5） |
-| POST `/records/today/withdraw` | master | 撤回 | F2-08、F2-09、F2-10 | 服务端校验三条件；失败 409 WITHDRAW_NOT_ALLOWED；成功回可编辑并留痕 |
+| POST `/records/today/withdraw` | master | 撤回 | F2-08、F2-09、F2-10 | 交班人提交后窗口内单方撤回本班次交接单（D-P05，TK-21 落地）：服务端按**当前班次日期（C-08）+ submitter=登录人**定位（duty_date UNIQUE → 至多一行；无行 404、非交班人 403）；**行锁下校三不可撤条件**（状态锁定先于窗口判定）——已确认（completed）→ `reason=ALREADY_CONFIRMED`、有异议（objection）→ `reason=IN_OBJECTION`、超窗口（submitted 但 now − submitted_at > `withdraw_window_minutes`）→ `reason=WINDOW_EXPIRED`，均 409 WITHDRAW_NOT_ALLOWED 携 `reason`（§2）提示走异议流程；draft（已撤回/从未提交）→ 409 CONFIRM_INCOMPLETE 同族；**成功转 draft + 清 submitted_at**（回到可编辑，F2-08）、version 不变（重提才 +1，F2-08-T2）、读数列保留；提交时生成的 alerts/elevator_checks **同事务清空**（快照语义，与 submitCore 重提先清后插同源）；接班人端待确认入口随 status 转 draft 同步消失（F2-09-T2，pending 取数口径 status='submitted'）；审计 `record.withdraw`（§5）；权威形状 shared dto `WithdrawResultDto` |
 | GET `/records/mine/objections` | master | 我被退回的异议单 | F2-06 | **我为 submitter 且 status='objection'**（重提转回 submitted 即从清单消失），按 duty_date 降序，含 objection_note/at 与接班人回显；供下次到岗处理（F2-13）；权威形状 shared dto `ObjectionListDto`（TK-20 落地） |
 | PUT `/records/{id}` | master | 异议单修改（objection 状态） | F2-07 | **部分合并语义（D-T23）**：仅上送字段写入、status 仍 objection、version 不变（PUT 默认 200）；字段级形状校验与 submit 同一 normalizeSections（越值 400 点名），必填完整性在 resubmit 把关；本版本**首次修改**时修改前全字段快照定格入 record_versions（snapshot/changed 旧值/修改人，F2-07-T1 四要素；UNIQUE(record_id, version) 幂等，changed 累计口径）；仅交班人本人（服务层 403）；请求体权威形状 shared dto `RecordUpdatePayloadDto`（TK-20 落地） |
 | POST `/records/{id}/resubmit` | master | 异议修改后重提 | F2-07 | **版本+1；重新走提交校验与计算**（D-T23）：表单值以 PUT 已写入行的值为准，请求体仅可选 confirmations/usage_overrides（防呆 409 与覆盖协议同 §4）；submitted_at=服务端时刻（重新提交即更新交接时间，PRD 附录 A）；标红确认行先清后插重建（快照语义）；下游 D+1 已提交单触发重算（trigger=objection_resubmit，响应带 recalc）；objection_note/at 保留在行上；仅交班人本人（服务层 403）；权威形状 shared dto `ResubmitPayloadDto`/`ResubmitResultDto`（TK-20 落地） |
@@ -182,7 +184,7 @@
 | POST `/records/backfill`（补交本体，TK-16） | `record.late_submit` | 补交语境留痕：`new_value` 记 duty_date 与版本；F6-06 漏交检测以 records 行存在为准，补交日自此不再计漏交（D-T21） |
 | POST `/records/backfill`（下游重算，TK-16） | `record.recalc` | **逐变更项一行**：`old_value` 记下游旧固化值，`new_value` 记新自动值与触发语境（trigger=late_backfill + 补交单号，或 trigger=objection_resubmit + 源单号 `source_record_no`，TK-20 异议重提）；**是否变更按数值判等而非字符串**（'500' 与 DECIMAL 列读回的 '500.0' 同值，评审 M1 探针实证：字符串判等使整数用量恒被误判为变更、假审计成倍产生）；豁免字段（当前版本 `record.usage_override` 行，D-T07）与数值无变化项均不入列也不写审计 |
 | POST `/records/backfill`（重算待复核，TK-16） | `record.recalc_review` | 仅当新基线使下游命中 D-T19 防呆判定时产生**一行**：`new_value.items` 存可解释命中清单（与响应 `recalc.needs_review` 同源）、`reason` 记「请走异议流程人工核对」；**不改数、不拦提交、不 409**（L6 拍板），与 `record.recalc` 的区别是本行不代表已授权改数，只留待复核线索。**确认复用口径（订正 19）**：原提交已确认的命中不重复标出——回退按「field+prev+current 三元组」值匹配（基线变化的新命中仍标出，防字段级复用静默解锁）、充气按卡号复用（D-P14 事实语义） |
-| POST `/records/today/withdraw` | `record.withdraw` | 谁、何时 |
+| POST `/records/today/withdraw` | `record.withdraw` | 谁（actor_id）、何时（created_at）；`old_value` 记 submitted 起点状态/版本/提交时刻，`new_value` 记 draft 归宿与版本（version 不变，TK-21） |
 | POST `/records/{id}/objection` | `record.objection` | `old_value` 记 submitted 起点状态与版本，`new_value` 记 objection/版本与异议原因（note 全文，reason 列留空）；重提时 objection_note/at 保留在行上（D-T23），重提本体复用 `record.submit`（newValue 记 resubmitted: true 与新版本，reason=「异议修改后重提」） |
 | POST `/records/{id}/confirm` | `record.confirm` | — |
 | PUT `/admin/users`… | `user.update` | 新旧值 |
@@ -222,3 +224,5 @@
 23. **v0.1 订正（2026-09-15）**：TK-19（逐条知晓与签名归档）落地联动——**§3.4 acknowledge/confirm 两行契约要点回填**（原文仅一句纲要）：① acknowledge：body `alert_ids[]`（权威形状 shared dto `AcknowledgePayloadDto`）、已知晓行不重复写（首次知晓时刻即留痕，响应 `{acknowledged}` = 本次新写入行数）、跨单/未知 id 容错忽略、非数组 400 合成定位项点名（confirmations 先例同门）、仅接班人本人（他人 403）、留痕落 alerts 行本身不另写审计（§5 审计表无新增行，行级归属即审计）；② confirm：body 传签名图 **PNG data URL**（权威形状 shared dto `ConfirmPayloadDto`），解码校验（`data:image/png;base64` 前缀 + PNG 魔数 + ≤512KB）后落盘 `/uploads/signatures/{record_no}.png` 记 signature_path（与《开发种子数据》completed 单同形态），confirmed_at=服务端时刻（DATA-09 同口径），**完整性终校与转 completed 同事务**（防「知晓与归档并发」中间态入档），成功转 completed（响应权威形状 shared dto `ConfirmResultDto`）并审计 `record.confirm`（§5 该行原文不变）；仅接班人本人可确认（C-05/D-P06）；非 submitted 状态的 acknowledge/confirm 归入 409 CONFIRM_INCOMPLETE 同族（文案区分语义，**错误码表 13 项不变、不增设新码**）。无新增路由（两条均为 §3.4 原有行），Phase 1 路由总数（33）不变。联动：台账增补 #33、任务分解修订 36。
 
 24. **v0.1 订正（2026-09-15）**：TK-20（异议与版本）落地联动，决策记录 **D-T23** 拍板（四项：PUT 直写行+首改快照 / resubmit 载体收窄 / 仅接班人本人 / 重提保留 objection 字段）——① **§3.2 异议三行与 §3.4 objection 行契约要点回填**（权威形状 shared dto `ObjectionListDto`/`ObjectionPayloadDto`/`ObjectionResultDto`/`RecordUpdatePayloadDto`/`ResubmitPayloadDto`/`ResubmitResultDto`）；② **§3.4 detail 行补历史版本摘要 versions**（F2-07-T1「历史版本可查」的查询面：version/editor 联 users 回显/edited_at/changed 字典名 → {旧值,新值}；全字段快照留 record_versions.snapshot 不入响应；无修改历史为空数组）；③ **§5 record.objection 行补 newValue 口径**（note 全文入 newValue，reason 列留空）；§5 record.recalc/recalc_review 触发语境扩展 trigger=objection_resubmit（检索键 source_record_no，late_backfill 的历史键名 backfill_record_no 不变，records-backfill.spec 断言锚点不变）；④ **订正 18 ⑧ 挂账闭环**：重算下游行 SELECT ... FOR UPDATE（并发触发源读-改-写不再互相覆盖），submitCore 事务捕获 ER_DUP_ENTRY（errno 1062）归一 409 RECORD_EXISTS——不再 500；⑤ **重提审计复用 record.submit**（§5 无独立 resubmit 行）：newValue 记 resubmitted: true 与新版本，防呆确认与用量覆盖留痕同 submit 口径随重提写入。错误码表 13 项不变、路由总数 33 不变（四条异议路由均属 §3.2/§3.4 既有行）。测试：records-objection.spec 5 项（F2-06-T1/F2-07-T1 + 闸门/快照累计/重提防呆），jest 全量 205/205（重灌种子）、E2E 53/53。联动：台账增补 #34、技术方案修订 27、决策记录增补 18、任务分解修订 37。
+
+25. **v0.1 订正（2026-09-16）**：TK-21（撤回窗口）落地联动（D-P05 既有拍板，无新决策）——① **§2 错误响应结构新增可选字段 `reason`**：原错误码表把 WITHDRAW_NOT_ALLOWED 的三原因写成括注（`reason`: WINDOW_EXPIRED/ALREADY_CONFIRMED/IN_OBJECTION），但§2 响应体无此字段、F2-10-T1/T2/T3 无可断言载体——升为正式响应字段（仅 WITHDRAW_NOT_ALLOWED 使用，其余错误码恒 null；权威形状 shared `ApiError.reason`，与已有 `WithdrawNotAllowedReason` 枚举呼应）；§2 JSON 示例与错误码表同步回写。② **§3.2 GET /records/today 要点补 `withdraw_window_minutes`**：服务端读 configs（非法/缺失回落 10，与种子同源）、供前端算撤回倒计时（F2-09-T1），与撤回校验同源不漂移（权威形状 shared `TodayDto`）。③ **§3.2 POST /records/today/withdraw 行要点回填**（原文仅一句纲要）：按当前班次（C-08）+submitter 定位、行锁下三不可撤条件（状态锁定先于窗口）、成功转 draft+清 submitted_at+同事务清 alerts/elevator_checks、version 不变（重提才 +1）、待确认入口同步消失、审计 record.withdraw（权威形状 shared `WithdrawResultDto`）。④ **§5 record.withdraw 行补 old_value/new_value 口径**。错误码表 13 项不变（reason 为 WITHDRAW_NOT_ALLOWED 的子原因载体、非新码）、路由总数 33 不变（withdraw 为 §3.2 既有行）。测试：records-withdraw.spec 8 项（F2-08-T1/T2、F2-09-T2、F2-10-T1/T2/T3 + 闸门 403/401/404/draft 重复撤回 409 + today 回传窗口黄金值），E2E withdraw.spec 2 项（F2-09-T1 倒计时客户端半边）。联动：台账增补 #35、任务分解修订 38。
