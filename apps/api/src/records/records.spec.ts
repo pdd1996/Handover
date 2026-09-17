@@ -207,7 +207,7 @@ describe('F1-01/F1-02/F1-03 今日交接首页（TK-05）', () => {
 
       // 判据「组织顺序与 PRD §6.0 一致」：点位顺序取自《开发种子数据》§三 sort_no
       expect(body.cards.map((c) => c.spot_name)).toEqual([
-        '表房',
+        '水表',
         '高配房',
         '燃气表房',
         '液氧站',
@@ -426,7 +426,7 @@ describe('F1-01/F1-02/F1-03 今日交接首页（TK-05）', () => {
       expect(body.record?.status).toBe('draft');
       expect(body.record?.record_no).toBe(TEST_RECORD_NO);
 
-      // 判据「计数与实际一致」：只有表房卡的水表读数被填，其余卡不受影响
+      // 判据「计数与实际一致」：只有水表卡的水表读数被填，其余卡不受影响
       const waterCard = body.cards.find((c) => c.key === 'water');
       expect(waterCard?.badge).toEqual({ filled: 1, total: 1, pending: 0, abnormal: 0 });
       expect(waterCard?.fields.find((f) => f.name === 'water_reading')?.filled).toBe(true);
@@ -440,7 +440,7 @@ describe('F1-01/F1-02/F1-03 今日交接首页（TK-05）', () => {
       const sumFilled = body.cards.reduce((n, c) => n + c.badge.filled, 0);
       expect(body.progress.filled).toBe(sumFilled);
 
-      // 板块汇总同步反映（板块一 = 表房卡）
+      // 板块汇总同步反映（板块一 = 水表卡）
       expect(body.sections.find((s) => s.no === 1)?.badge.filled).toBe(1);
     });
 

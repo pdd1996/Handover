@@ -66,7 +66,7 @@ test.describe('DATA-03-T1：使用罐号枚举驱动液氧卡片标题「在用/
     await page.getByTestId('back-to-today').click();
     await expect(page.getByTestId('card-title-lo_am')).toHaveText('液氧站（早） · 1号在用');
     await expect(page.getByTestId('card-title-lo_pm')).toHaveText('液氧站（晚） · 1号在用');
-    await expect(page.getByTestId('card-title-water')).toHaveText('表房');
+    await expect(page.getByTestId('card-title-water')).toHaveText('水表');
 
     // 20:30 卡同步跟随（同一 records 列 tank_in_use，草稿跨卡可见）；
     // tank_in_use 控件只在 8:30 卡（lo_pm 字典无此字段），切换罐号须回 8:30 卡操作

@@ -62,7 +62,7 @@ interface TodayBody {
  * 出处：《开发种子数据 v0.1》§三 巡检点位表（11 个点位）。
  */
 const EXPECTED_SPOTS = [
-  '表房',
+  '水表',
   '高配房',
   '燃气表房',
   '液氧站',
@@ -198,7 +198,7 @@ test.describe('F1-02-T2：点击卡片进入板块填写页，只见本板块字
     await expect(page.getByTestId('card-list')).toBeVisible();
   }
 
-  test('表房卡只见水板块字段', async ({ page }) => {
+  test('水表卡只见水板块字段', async ({ page }) => {
     const body = await loginAndOpenToday(page);
     await expectNoCrossTalk(page, body, 'water');
   });
@@ -330,7 +330,7 @@ test.describe('F1-03-T1：角标与顶部进度条实时汇总已填/待填/异�
   test('填齐一张卡 → 该卡角标转"已填"绿色', async ({ page }) => {
     await loginAndOpenToday(page);
 
-    // 同样以改写真实响应的方式模拟"表房卡已填完"（唯一 countable 字段 water_reading 有值）
+    // 同样以改写真实响应的方式模拟"水表卡已填完"（唯一 countable 字段 water_reading 有值）
     await page.route(TODAY_URL, async (route) => {
       const res = await route.fetch();
       const body = (await res.json()) as TodayBody;
