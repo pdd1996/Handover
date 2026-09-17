@@ -678,14 +678,10 @@ const headerTitle = computed(() =>
       </template>
     </van-nav-bar>
 
-    <!-- 卡片归属信息：点位 + 覆盖板块（值班室卡兼管板块八，故可能多板块） -->
+    <!-- 卡片归属信息：点位 -->
     <div class="bg-white px-4 py-3 text-sm text-slate-600">
       <div>
         点位：<b class="text-slate-800">{{ card.spot_name }}</b>
-      </div>
-      <div class="mt-1">
-        覆盖板块：
-        <b class="text-slate-800">{{ card.sections.join('、') }}</b>
       </div>
     </div>
 
