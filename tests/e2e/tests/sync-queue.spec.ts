@@ -1,5 +1,5 @@
 /**
- * TK-15 离线三层缓冲（待同步队列）E2E —— 挂钩台账用例 **F1-06-T1 / F1-07-T1 / F1-07-T2 / F1-14-T1**。
+ * TK-15 离线三层缓冲（待同步队列）E2E —— 挂钩台账用例 **F1-06-T1 / F1-06-T2 / F1-07-T1 / F1-07-T2 / F1-14-T1**。
  *
  * 层级说明（比照 TK-06/TK-09/TK-12 先例）：F1-07-T2 在《测试用例清单》标「接口」，但其语义是
  * 「服务器对客户端队列零感知」——队列只在浏览器 IndexedDB，服务端无任何端点参与，E2E 以
@@ -421,5 +421,23 @@ test.describe('TK-15 评审修复轮回归（M2/M3/M4/M6/L3/L5）', () => {
     await page.getByTestId('logout').click();
     await expect(page.getByTestId('login-form')).toBeVisible();
     await expect(page.getByTestId('device-queue-hint')).toContainText('本机有 1 张未同步的交接单');
+  });
+});
+
+test.describe('F1-06-T2：空态同步 chip 收敛（0 项已填且无待同步 → 不显示）', () => {
+  test('全新登录空态 → sync-chip 不渲染；填一项后出现并显「已同步」', async ({ page }) => {
+    await login(page); // 新 context：无草稿、无队列，D0 种子留空 → 0 项已填
+
+    // 空态判据：同步语义只由待同步队列产生（D-T20），队列空 + 0 项已填时「已同步」是
+    // 空洞为真的陈述（无宾语易读作「交接单已上传」），chip 不渲染；记录状态照常可见
+    await expect(page.getByTestId('record-status')).toHaveText('尚未开始');
+    await expect(page.getByTestId('sync-chip')).toHaveCount(0);
+
+    // 有填写内容后 chip 恢复显示：队列仍空 →「已同步」（此刻不再歧义——有内容可指代）
+    await page.getByTestId('task-card-water').click();
+    await page.getByTestId('input-water_reading').locator('input').fill('90000.0');
+    await page.getByTestId('complete-card').click();
+    await expect(page.getByTestId('card-list')).toBeVisible();
+    await expect(page.getByTestId('sync-chip')).toContainText('已同步');
   });
 });
