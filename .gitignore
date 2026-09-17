@@ -17,3 +17,5 @@ outputs/
 docs/upload
 
 diff_svc.txt
+
+apps/api/data/uploads/signatures/
