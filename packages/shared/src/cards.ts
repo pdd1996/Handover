@@ -107,11 +107,11 @@ export interface CardDef {
 export const TASK_CARDS = [
   {
     key: 'water',
-    spotName: '表房',
+    spotName: '水表',
     slot: null,
     slotLabel: null,
     sections: [1],
-    title: '表房',
+    title: '水表',
     kind: 'form',
     fields: ['water_reading', 'water_use'],
   },

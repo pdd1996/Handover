@@ -103,7 +103,7 @@ async function main(): Promise<void> {
 
   // ── 三、巡检点位（11 个；板块八随 PRD 附录 A 落位）─────────
   await db.insert(spots).values([
-    { name: '表房', sortNo: 10 },
+    { name: '水表', sortNo: 10 },
     { name: '高配房', sortNo: 20 },
     { name: '燃气表房', sortNo: 30 },
     { name: '液氧站', sortNo: 40 },
