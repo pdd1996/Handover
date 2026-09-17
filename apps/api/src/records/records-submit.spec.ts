@@ -25,6 +25,7 @@ import { Test } from '@nestjs/testing';
 import { eq, gt } from 'drizzle-orm';
 import request from 'supertest';
 import type { PreviewDto, SubmitPayloadDto, SubmitResultDto, TodayDto } from '@handover/shared';
+import { localMeasuredAt, localTimestampToDate } from '@handover/shared';
 import { AppModule } from '../app.module';
 import { configureApp } from '../app.setup';
 import { DB, type Db } from '../db/db.module';
@@ -506,19 +507,14 @@ describe('TK-12 在线提交与预览（F1-10/F2-01/F1-08/DATA-01/05/07/09/10/13
       expect(row?.loMeasuredPm).toBe('2026-09-12 20:15:00');
       // DATA-09-T1：submitted_at = 服务端收到时刻（与上送的固定测量时刻不同、且贴近当前时刻）
       expect(row?.submittedAt).not.toBe('2026-09-12 08:12:00');
-      // 本地时间字符串比较：同一格式化函数双向归一（Asia/Shanghai，与 duty-date.ts 同口径）
-      const toMs = (v: string) => Date.parse(v.replace(' ', 'T') + 'Z');
-      const serverNow = new Intl.DateTimeFormat('sv-SE', {
-        timeZone: 'Asia/Shanghai',
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-        hour12: false,
-      }).format(new Date());
-      expect(Math.abs(toMs(row!.submittedAt!) - toMs(serverNow))).toBeLessThan(5 * 60 * 1000);
+      // 同框比较（TK-21 口径）：submitted_at 与测试侧 now 均为「本机时区本地时间戳」字面量
+      // （服务端用 localMeasuredAt 取本机分量），须经 localTimestampToDate 按本机分量还原后
+      // 相减；不得按固定时区归一后 Date.parse('…Z') 比较——宿主机非东八区（CI 为 UTC）时
+      // 两侧差整 8 小时，与 duty_date（SHIFT_TIMEZONE 分界）分属两套口径，勿混用
+      const submittedMs = localTimestampToDate(row!.submittedAt!);
+      expect(submittedMs).not.toBeNull();
+      const serverNowMs = localTimestampToDate(localMeasuredAt())!.getTime();
+      expect(Math.abs(submittedMs!.getTime() - serverNowMs)).toBeLessThan(5 * 60 * 1000);
       // 客户端伪造 submitted_at / duty_date 不被采信（记录级字段服务端为准）
       expect(row?.dutyDate).toBe(dutyDate);
       await cleanRecord();
