@@ -12,6 +12,11 @@ import type {
   MissingSubmitListDto,
   RecordDetailDto,
   RecordListDto,
+  UserCreatePayloadDto,
+  UserCreateResultDto,
+  UserListDto,
+  UserStatusPatchPayloadDto,
+  UserStatusPatchResultDto,
   UserRole,
 } from '@handover/shared';
 
@@ -81,6 +86,30 @@ export const api = {
   /** GET /auth/me —— 刷新页面后恢复登录态；role ≠ chief 由调用方拒绝进入后台（C-05） */
   me(): Promise<AuthUser> {
     return http('/auth/me');
+  },
+
+  /**
+   * GET /admin/users —— 账号全景（F6-02 查询半边，契约 §3.6，TK-25）：
+   * 全量账号 id 升序（= 开通顺序）；启停仅对师傅账号开放（服务端 chief 目标 403）。
+   */
+  usersList(): Promise<UserListDto> {
+    return http('/admin/users');
+  },
+
+  /** POST /admin/users —— 开通师傅账号（F6-02「开通」，TK-25；角色恒 master，D-T25） */
+  userCreate(payload: UserCreatePayloadDto): Promise<UserCreateResultDto> {
+    return http('/admin/users', { method: 'POST', body: JSON.stringify(payload) });
+  },
+
+  /**
+   * PATCH /admin/users/{id} —— 停用/启用（F6-02「停用即不可登录」，TK-25）：
+   * 服务端停用即删该账号全部会话存根（D-T13）并审计 user.update 新旧值。
+   */
+  userPatchStatus(
+    id: number,
+    payload: UserStatusPatchPayloadDto,
+  ): Promise<UserStatusPatchResultDto> {
+    return http(`/admin/users/${id}`, { method: 'PATCH', body: JSON.stringify(payload) });
   },
 
   /**

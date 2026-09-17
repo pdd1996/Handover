@@ -76,12 +76,15 @@ const filterStatus = ref<string>('');
 const items = ref<readonly RecordListItemDto[]>([]);
 const listLoading = ref(false);
 
-/** 交班人候选：从当前已加载行聚合（本页不拉人员全表——人员管理随 TK-25 落地后可换源） */
-const submitterOptions = computed(() => {
-  const map = new Map<number, string>();
-  for (const it of items.value) map.set(it.submitter.id, it.submitter.real_name);
-  return [...map.entries()].map(([id, name]) => ({ value: String(id), label: name }));
-});
+/** 交班人候选：人员全表（TK-25 GET /admin/users；含已停用师傅——历史单的交班人仍需可筛） */
+const submitterOptions = ref<{ value: string; label: string }[]>([]);
+
+async function loadSubmitters(): Promise<void> {
+  const list = await api.usersList();
+  submitterOptions.value = list.items
+    .filter((u) => u.role === 'master')
+    .map((u) => ({ value: String(u.id), label: u.real_name }));
+}
 
 function query(): { from?: string; to?: string; submitter_id?: string; status?: string } {
   const [start, end] = filterRange.value ?? [];
@@ -207,6 +210,7 @@ async function saveAnnotate(): Promise<void> {
 onMounted(() => {
   void loadMissing();
   void load();
+  void loadSubmitters().catch(handleLoadError);
 });
 </script>
 
