@@ -1888,6 +1888,23 @@ export class RecordsService {
   }
 
   /**
+   * 该班次**当日**排班人（TK-26，F6-05 排班安全阀比对基线）：与 scheduledReceiverOf 同族
+   * 取数、日期取本班次当日（带出取 +1 天，安全阀取当天——「登录提交人 ≠ 当日排班」，
+   * PRD §6.6）。排班缺失返回 null（无可比基线不判定，同防呆「任一侧缺失不判定」精神）。
+   */
+  private async scheduledDutyOf(
+    dutyDate: string,
+  ): Promise<{ id: number; realName: string } | null> {
+    const rows = await this.db
+      .select({ id: users.id, realName: users.realName })
+      .from(schedules)
+      .innerJoin(users, eq(schedules.userId, users.id))
+      .where(eq(schedules.dutyDate, dutyDate))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
+  /**
    * 提交侧校验入口（契约 §4 第 1 步）：shared validateFields 同一引擎（F1-08），
    * 字段清单排除 `receiver_change_reason`——它是**条件必填**（DATA-10：仅修改接班人时必填），
    * 依赖接班人上下文，不属静态字段引擎的判定范围，由调用方按带出值判定后追加点名。
@@ -2515,7 +2532,8 @@ export class RecordsService {
    *
    * 步骤对照契约 §4：① 必填/范围校验 → 400（C-09 结构，含用量覆盖/补录读数同口径预检，
    * 评审修复轮 M3 + TK-14）；② 防呆判定已随 TK-14 落地（F1-12 读数回退 / F1-13 充气，
-   * 409 need_confirm 清单；confirmations 消费口径见下；duty_guard_confirm 仍仅接收，随 TK-26）；
+   * 409 need_confirm 清单；confirmations 消费口径见下；排班安全阀 409 DUTY_MISMATCH 已随
+   * TK-26 落地、置于防呆 409 之前，duty_guard_confirm 消费口径见「第 ② 步前置门」注）；
    * ③ 用量固化已随 TK-13 落地（服务端计算 + 覆盖协议，评审修复轮 L1 起在校验与 409 判定之后执行；
    * 上一班取数 = 相邻班次记录行或缺失态补录值，充气确认后的卡按 0 计 D-P14）；
    * ④ 标红确认行（alerts）已随 TK-17（电梯不一致）与 TK-18（状态异常、交接事项拆条）落地；
@@ -2534,7 +2552,9 @@ export class RecordsService {
    * POST /records/backfill（TK-16，F3-08-T1 触发载体；决策记录 **D-T21**，2026-09-13 拍板）：
    * 上一班记录晚到（离线滞留单，被 D-T20 M1 挡在排空引擎外）的合法入库路径。
    * - duty_date 显式上送：日历合法且**严格早于当前班次日期**（当日/未来班次走 /today/submit）；
-   * - 提交人恒为登录人本人（不代录他人；科长代录他人挂 TK-24，F6-05 安全阀随 TK-26）；
+   * - 提交人恒为登录人本人（不代录他人；科长代录他人挂 TK-24 处置面板）；**登录人须与补交
+   *   班次排班人一致（或经排班安全阀确认）**——TK-26 起 D-T21 挂账「补交班次排班归属校验，
+   *   防冒名补交他人班次」以 DUTY_MISMATCH 同一出口闭环（F6-05）；
    * - 校验/防呆/覆盖/补录协议与 /today/submit 完全同口径（submitCore 单一实现）；
    * - 该班次已有任何记录（含 draft）→ 409 RECORD_EXISTS；
    * - 补交成功后**同事务**触发下游重算（F3-08：仅紧邻 D+1 已提交记录、手工覆盖豁免，
@@ -2667,6 +2687,36 @@ export class RecordsService {
         opts.late ? '该班次记录已存在，不可重复补交' : '当日记录已提交，不可重复提交',
       );
     }
+
+    // 第 ② 步前置门（TK-26，F6-05 排班安全阀；决策记录 D-T26）：登录提交人 ≠ 该班次排班人
+    // → 409 DUTY_MISMATCH，客户端确认实际当班后随 payload.duty_guard_confirm 重提放行。
+    // 置于防呆 409 之前——身份对账先于业务防呆（先解决「谁在提交」，再解决「读数对不对」，
+    // 与「未登录 401 先于 403」同族门序）；补交链路同门（D-T21 挂账「补交班次排班归属校验，
+    // 防冒名补交他人班次」的出口）。排班缺失不判定（无可比基线，同防呆缺失态放行精神）；
+    // 提交链路角色列 master（chief 无此门——无提交权，403 已在前）。确认消费口径：
+    // `duty_guard_confirm.confirmed === true` 是唯一解锁（拒绝确认/未确认/畸形一律再 409，
+    // F6-05-T2）；reason 选填（demo 口径确认即留痕），仅命中的本次提交写审计 record.guard_confirm；
+    // 排班与登录人一致时该字段被忽略（不写审计，同「未命中确认不入账」口径）。
+    const scheduledDuty = await this.scheduledDutyOf(dutyDate);
+    const guardMismatch = scheduledDuty !== null && scheduledDuty.id !== user.id;
+    if (guardMismatch && payload?.duty_guard_confirm?.confirmed !== true) {
+      const guardMessage = opts.late
+        ? `${dutyDate} 班次排班为${scheduledDuty.realName}，您以 ${user.realName} 身份补交，请确认实际当班`
+        : `今日排班为${scheduledDuty.realName}，您以 ${user.realName} 身份提交，请确认实际当班`;
+      throw new ApiException('DUTY_MISMATCH', guardMessage, {
+        needConfirm: [
+          {
+            type: 'duty_guard',
+            scheduled_name: scheduledDuty.realName,
+            message: guardMessage,
+          },
+        ],
+      });
+    }
+    const guardReason =
+      typeof payload?.duty_guard_confirm?.reason === 'string'
+        ? payload.duty_guard_confirm.reason.trim()
+        : '';
 
     // 第 ② 步（TK-14，契约 §4 防呆判定）：上一班取数与 GET /prev 同源（adjacentPrevRow，D-T17）；
     // 相邻班次缺失时补录值（F3-07，已过 validatePrevBackfill）成为比对与计算基线——仅**非首班的
@@ -2891,6 +2941,22 @@ export class RecordsService {
                 ? { type: c.type, field: c.field, prev: c.prev, current: c.current, version }
                 : { type: c.type, card: c.card, prev: c.prev, current: c.current, version },
             reason: c.reason,
+          });
+        }
+
+        // 排班安全阀留痕（TK-26，F6-05「确认后方可提交并留痕」；契约 §5 record.guard_confirm）：
+        // 仅**命中**（登录人 ≠ 该班次排班人且确认放行）的本次提交写入一行——oldValue 记
+        // 排班基线、newValue 记实际提交人（对账两端的姓名/id 齐备，demo「身份对账」行同源），
+        // reason 携调班说明（选填，空白置 null）
+        if (guardMismatch) {
+          await tx.insert(auditLogs).values({
+            actorId: user.id,
+            action: 'record.guard_confirm',
+            targetType: 'record',
+            targetId: recordNo,
+            oldValue: { user_id: scheduledDuty!.id, real_name: scheduledDuty!.realName },
+            newValue: { user_id: user.id, real_name: user.realName, version },
+            reason: guardReason !== '' ? guardReason : null,
           });
         }
 

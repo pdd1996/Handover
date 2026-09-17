@@ -1,11 +1,15 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { asc, eq } from 'drizzle-orm';
+import { and, asc, eq, gte, lte } from 'drizzle-orm';
 import bcrypt from 'bcryptjs';
 import type {
   MissingField,
   MissingSubmitItemDto,
   MissingSubmitListDto,
   RecordStatus,
+  ScheduleItemDto,
+  ScheduleMonthDto,
+  SchedulePutPayloadDto,
+  SchedulePutResultDto,
   UserCreatePayloadDto,
   UserCreateResultDto,
   UserListItemDto,
@@ -13,9 +17,11 @@ import type {
   UserStatusPatchPayloadDto,
   UserStatusPatchResultDto,
 } from '@handover/shared';
+import { localMeasuredAt } from '@handover/shared';
 import { ApiException } from '../common/api-error';
 import { DB, type Db } from '../db/db.module';
-import { auditLogs, users } from '../db/schema';
+import { auditLogs, schedules, users } from '../db/schema';
+import { isValidCalendarDate, localWallClock } from '../records/duty-date';
 import { AuthService, type SessionUser } from '../auth/auth.service';
 import type { RecordListFilters } from '../records/records.service';
 import { RecordsService } from '../records/records.service';
@@ -34,6 +40,18 @@ const USER_BAD = (field: string, label: string): MissingField => ({
 
 /** username 规则：1~32 位字母/数字/下划线（users.username varchar(32) UNIQUE，D-T25 ①） */
 const USERNAME_RE = /^\w{1,32}$/;
+
+/** 排班月视图参数（GET ?month=）与点名项（非表单字段，锚点指向后台排班卡；USER_BAD 同式先例） */
+const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
+const SCHEDULE_BAD = (field: string, label: string): MissingField => ({
+  field: field as MissingField['field'],
+  section: 0,
+  label,
+  anchor: '#schedule-form',
+});
+
+/** 审计 `schedule.update`（契约 §5「新旧值」）的新旧值载荷 */
+type ScheduleAuditValue = { user_id: number; real_name: string };
 
 /** 初始密码长度界（D-T25 ①）：8~64 字；bcrypt 加盐哈希落库，明文不落库不回显 */
 const PASSWORD_MIN = 8;
@@ -313,5 +331,130 @@ export class AdminService {
 
     const rows = await this.db.select().from(users).where(eq(users.id, id)).limit(1);
     return AdminService.toItem(rows[0]!);
+  }
+
+  // ── 排班管理（F6-03/F6-04，TK-26；契约 §3.6 GET/PUT /admin/schedules）─────────────
+
+  /**
+   * GET /admin/schedules（F6-03 查询半边）：排班月视图，`?month=YYYY-MM` 缺省取当前墙钟月
+   * （SHIFT_TIMEZONE 本地日历，与班次分界同一时区口径）。**稀疏列示**——仅返回该月内
+   * schedules 既有行（无排班日不出行，前端渲染空位），duty_date 升序；排班人姓名联 users
+   * 回显（停用账号的历史排班仍显原名，demo 口径「已停用」标注属前端展示层）。
+   */
+  async schedulesMonth(month?: string): Promise<ScheduleMonthDto> {
+    const raw = typeof month === 'string' ? month.trim() : '';
+    if (raw !== '' && !MONTH_RE.test(raw)) {
+      throw new ApiException(
+        'VALIDATION_OUT_OF_RANGE',
+        '月份参数非法（应为 YYYY-MM，如 2026-09）',
+        { missingFields: [SCHEDULE_BAD('month', '月份（YYYY-MM）')] },
+      );
+    }
+    const m = raw !== '' ? raw : localWallClock(new Date()).date.slice(0, 7);
+    const [y, mo] = [Number(m.slice(0, 4)), Number(m.slice(5, 7))];
+    const first = `${m}-01`;
+    // 月末 = 下月 0 号（UTC 日历算术，纯日期无时区歧义）
+    const last = new Date(Date.UTC(y, mo, 0)).toISOString().slice(0, 10);
+    const rows = await this.db
+      .select({
+        dutyDate: schedules.dutyDate,
+        userId: schedules.userId,
+        realName: users.realName,
+        updatedAt: schedules.updatedAt,
+      })
+      .from(schedules)
+      .innerJoin(users, eq(users.id, schedules.userId))
+      .where(and(gte(schedules.dutyDate, first), lte(schedules.dutyDate, last)))
+      .orderBy(asc(schedules.dutyDate));
+    const items: ScheduleItemDto[] = rows.map((r) => ({
+      duty_date: r.dutyDate,
+      user_id: r.userId,
+      real_name: r.realName,
+      updated_at: r.updatedAt,
+    }));
+    return { month: m, items };
+  }
+
+  /**
+   * PUT /admin/schedules（F6-03「科长维护排班表，改即审计」）：单日单条 upsert——
+   * 一天一人由 schedules.duty_date UNIQUE 承载（契约 §3.6），同日已有排班即为改派。
+   * 口径：
+   * - duty_date 须为日历有效 `YYYY-MM-DD`（isValidCalendarDate 单一权威，拦 02-30 等），
+   *   user_id 须为**存在的师傅账号**（chief 目标与未知 id 均 400 点名 user_id——排班人
+   *   恒为师傅，C-05；停用账号不新增指派但历史行保留，前端候选只列 active，demo 口径）；
+   * - **同值重复 PUT 值无变化不更新不写审计**（D-T21 M1 同一精神，TK-24/25 先例）；
+   * - 变更与审计 `schedule.update`（契约 §5「新旧值」）同事务：oldValue/newValue 携
+   *   `{user_id, real_name}` 前后值，targetId = duty_date，操作人/时刻即 actor_id/created_at；
+   * - upsert 走 INSERT … ON DUPLICATE KEY UPDATE（并发窗口不撞 1062，userCreate 兜并发
+   *   同理），并回写 updated_by/updated_at（表列既有结构，无迁移）。
+   * 驱动面（F6-04）零改动：接班人带出（scheduledReceiverOf）与漏交扫描
+   * （missingSubmitShifts）读同一张 schedules 表，本处落库次班即生效。
+   */
+  async schedulePut(
+    actor: SessionUser,
+    payload: SchedulePutPayloadDto,
+  ): Promise<SchedulePutResultDto> {
+    const dutyDate = typeof payload?.duty_date === 'string' ? payload.duty_date.trim() : '';
+    if (!isValidCalendarDate(dutyDate)) {
+      throw new ApiException('VALIDATION_OUT_OF_RANGE', '值班日期非法（应为日历有效 YYYY-MM-DD）', {
+        missingFields: [SCHEDULE_BAD('duty_date', '值班日期（YYYY-MM-DD）')],
+      });
+    }
+    const userId = payload?.user_id;
+    if (!Number.isInteger(userId) || (userId as number) <= 0) {
+      throw new ApiException('VALIDATION_OUT_OF_RANGE', '值班师傅非法', {
+        missingFields: [SCHEDULE_BAD('user_id', '值班师傅')],
+      });
+    }
+
+    const changed = await this.db.transaction(async (tx) => {
+      const targets = await tx
+        .select({ id: users.id, realName: users.realName, role: users.role })
+        .from(users)
+        .where(eq(users.id, userId as number))
+        .limit(1);
+      const target = targets[0];
+      if (!target || target.role !== 'master') {
+        throw new ApiException('VALIDATION_OUT_OF_RANGE', '值班师傅须为师傅账号（C-05）', {
+          missingFields: [SCHEDULE_BAD('user_id', '值班师傅（师傅账号）')],
+        });
+      }
+
+      const prevRows = await tx
+        .select({ userId: schedules.userId, realName: users.realName })
+        .from(schedules)
+        .innerJoin(users, eq(users.id, schedules.userId))
+        .where(eq(schedules.dutyDate, dutyDate))
+        .limit(1);
+      const prev = prevRows[0] ?? null;
+      if (prev && prev.userId === target.id) {
+        return { changed: false, realName: target.realName, updatedAt: null };
+      }
+
+      const now = localMeasuredAt();
+      await tx
+        .insert(schedules)
+        .values({ dutyDate, userId: target.id, updatedBy: actor.id, updatedAt: now })
+        .onDuplicateKeyUpdate({
+          set: { userId: target.id, updatedBy: actor.id, updatedAt: now },
+        });
+      await tx.insert(auditLogs).values({
+        actorId: actor.id,
+        action: 'schedule.update',
+        targetType: 'schedule',
+        targetId: dutyDate,
+        oldValue: prev ? { user_id: prev.userId, real_name: prev.realName } : null,
+        newValue: { user_id: target.id, real_name: target.realName } satisfies ScheduleAuditValue,
+      });
+      return { changed: true, realName: target.realName, updatedAt: now };
+    });
+
+    return {
+      duty_date: dutyDate,
+      user_id: userId as number,
+      real_name: changed.realName,
+      changed: changed.changed,
+      updated_at: changed.updatedAt,
+    };
   }
 }

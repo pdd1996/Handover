@@ -1,8 +1,22 @@
-import { Body, Controller, Get, Param, Patch, Post, Query, Res, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  Patch,
+  Post,
+  Put,
+  Query,
+  Res,
+  UseGuards,
+} from '@nestjs/common';
 import type { Response } from 'express';
 import type {
   AnnotationResultDto,
   MissingSubmitListDto,
+  ScheduleMonthDto,
+  SchedulePutPayloadDto,
+  SchedulePutResultDto,
   UserCreatePayloadDto,
   UserCreateResultDto,
   UserListDto,
@@ -81,6 +95,29 @@ export class AdminController {
     @Body() payload: UserStatusPatchPayloadDto,
   ): Promise<UserStatusPatchResultDto> {
     return this.admin.userPatchStatus(user, Number(id), payload);
+  }
+
+  /**
+   * GET /api/v1/admin/schedules —— 排班月视图（F6-03 查询半边，TK-26；契约 §3.6）：
+   * `?month=YYYY-MM` 缺省当前墙钟月，稀疏列示该月排班行（duty_date 升序）。
+   */
+  @Get('schedules')
+  schedulesMonth(@Query('month') month?: string): Promise<ScheduleMonthDto> {
+    return this.admin.schedulesMonth(month);
+  }
+
+  /**
+   * PUT /api/v1/admin/schedules —— 单日排班维护（F6-03「改即审计」，TK-26；D-T26）：
+   * 单日单条 upsert（一天一人 duty_date UNIQUE），同值不写审计；变更与审计
+   * `schedule.update` 同事务（契约 §5）。落库即驱动接班人带出与漏交检测（F6-04，
+   * 消费方读同一张 schedules 表，零额外改动）。
+   */
+  @Put('schedules')
+  schedulePut(
+    @CurrentUser() user: SessionUser,
+    @Body() payload: SchedulePutPayloadDto,
+  ): Promise<SchedulePutResultDto> {
+    return this.admin.schedulePut(user, payload);
   }
 
   /**
