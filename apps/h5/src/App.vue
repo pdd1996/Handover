@@ -1005,7 +1005,6 @@ watch(
     <div class="px-4 pt-8">
       <div class="mb-6 text-center">
         <div class="text-xl font-bold text-slate-800">今日交接</div>
-        <div class="mt-1 text-sm text-slate-500">请使用本人账号登录（一人一号）</div>
       </div>
 
       <!-- L5（评审修复轮）：本机（不分账号）存在待同步单时登录页提示——共用设备的
