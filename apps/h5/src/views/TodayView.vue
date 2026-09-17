@@ -331,12 +331,6 @@ onUnmounted(stopWithdrawTimer);
         <span class="text-xs text-amber-700">接班核对 · 点击查看</span>
       </button>
 
-      <!-- 巡检动线提示（对齐 demo v0.3 首页提示语：按巡检路线到点位点开卡片） -->
-      <div class="my-3 text-sm leading-relaxed text-slate-600">
-        按巡检路线到点位点开卡片填写即可，内容自动暂存、随时退出；
-        <b>液氧到点各测一次</b>，晚间建议顺路完成电梯核对。
-      </div>
-
       <!-- 12 张任务卡：顺序与构成由接口给（spots 表驱动），前端不重排 -->
       <div class="flex flex-col gap-2.5" data-testid="card-list">
         <TaskCard
@@ -349,10 +343,6 @@ onUnmounted(stopWithdrawTimer);
           :data-index="i"
           @open="(key) => $emit('open', key)"
         />
-      </div>
-
-      <div class="mt-4 text-center text-xs text-slate-400">
-        共 {{ today.cards.length }} 张任务卡 · 覆盖十个板块
       </div>
 
       <!-- 提交入口（TK-12，F1-10/F2-01）：当日无记录或有 draft 记录（撤回重提，评审 M6）时可见；
@@ -368,12 +358,8 @@ onUnmounted(stopWithdrawTimer);
         >
           提交交接单
         </van-button>
-        <div class="mt-1.5 text-center text-xs text-slate-400">
-          {{
-            syncing
-              ? '正在同步待同步队列，请稍候…'
-              : '提交前先预览未填项与异常项，提交后生成本班次正式交接单'
-          }}
+        <div v-if="syncing" class="mt-1.5 text-center text-xs text-slate-400">
+          正在同步待同步队列，请稍候…
         </div>
       </div>
 

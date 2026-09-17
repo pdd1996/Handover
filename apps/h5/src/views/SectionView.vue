@@ -796,7 +796,6 @@ const headerTitle = computed(() =>
           </van-button>
         </div>
         <div class="mx-4 mt-3 text-xs leading-relaxed text-slate-400">
-          核对结果自动暂存本机，稍候即自动保存；不一致项提交时将生成标红确认行。
           <!-- 「已自动保存」指示（F1-09，与表单卡同口径）：落盘点亮，兼 E2E 同步点 -->
           <span
             v-if="draftSaved"
@@ -1034,7 +1033,6 @@ const headerTitle = computed(() =>
       </div>
 
       <div class="mx-4 mt-3 text-xs leading-relaxed text-slate-400">
-        填写内容自动暂存本机，稍候即自动保存，关闭页面重开可续填。
         <!-- 「已自动保存」指示（F1-09）：本次页面会话内至少一次成功落盘，兼作 E2E 同步点 -->
         <span v-if="draftSaved" data-testid="draft-saved" class="block font-bold text-emerald-600">
           草稿已自动保存
