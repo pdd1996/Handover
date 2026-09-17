@@ -12,6 +12,9 @@ import type {
   MissingSubmitListDto,
   RecordDetailDto,
   RecordListDto,
+  ScheduleMonthDto,
+  SchedulePutPayloadDto,
+  SchedulePutResultDto,
   UserCreatePayloadDto,
   UserCreateResultDto,
   UserListDto,
@@ -110,6 +113,22 @@ export const api = {
     payload: UserStatusPatchPayloadDto,
   ): Promise<UserStatusPatchResultDto> {
     return http(`/admin/users/${id}`, { method: 'PATCH', body: JSON.stringify(payload) });
+  },
+
+  /**
+   * GET /admin/schedules —— 排班月视图（F6-03，契约 §3.6，TK-26）：
+   * ?month=YYYY-MM 缺省当前月，稀疏列示该月排班行（duty_date 升序）。
+   */
+  schedulesMonth(month?: string): Promise<ScheduleMonthDto> {
+    return http(`/admin/schedules${month ? `?month=${encodeURIComponent(month)}` : ''}`);
+  },
+
+  /**
+   * PUT /admin/schedules —— 单日排班维护（F6-03「改即审计」，契约 §3.6，TK-26）：
+   * 单日单条 upsert；同值不写审计；变更审计 schedule.update 新旧值。
+   */
+  schedulePut(payload: SchedulePutPayloadDto): Promise<SchedulePutResultDto> {
+    return http('/admin/schedules', { method: 'PUT', body: JSON.stringify(payload) });
   },
 
   /**
