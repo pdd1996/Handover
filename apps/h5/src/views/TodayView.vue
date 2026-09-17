@@ -323,12 +323,12 @@ onUnmounted(stopWithdrawTimer);
       <button
         v-if="(pendingCount ?? 0) > 0"
         type="button"
-        class="mt-3 flex w-full items-center justify-between rounded-xl bg-red-600 px-4 py-3 text-left text-white shadow-md"
+        class="mt-3 flex w-full items-center justify-between rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-left shadow-md"
         data-testid="pending-entry"
         @click="$emit('confirm')"
       >
-        <span class="text-base font-bold">有 {{ pendingCount }} 份交接单待确认</span>
-        <span class="text-xs opacity-90">接班核对 · 点击查看</span>
+        <span class="text-base font-bold text-amber-800">有 {{ pendingCount }} 份交接单待确认</span>
+        <span class="text-xs text-amber-700">接班核对 · 点击查看</span>
       </button>
 
       <!-- 巡检动线提示（对齐 demo v0.3 首页提示语：按巡检路线到点位点开卡片） -->
@@ -361,7 +361,7 @@ onUnmounted(stopWithdrawTimer);
       <div v-if="canSubmit && (!today.record || today.record.status === 'draft')" class="mt-5">
         <van-button
           block
-          type="danger"
+          type="primary"
           :disabled="syncing"
           data-testid="submit-open"
           @click="$emit('submit')"
