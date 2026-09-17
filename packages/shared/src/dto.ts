@@ -11,7 +11,7 @@
  * ——TK-04 已评审验收，不为迁移而动它；后续接口扩充时一并归入本文件。
  */
 
-import type { ElevatorCheckActual, RecordStatus } from './enums';
+import type { ElevatorCheckActual, RecordStatus, UserRole, UserStatus } from './enums';
 import type { AlertLevel } from './alerts';
 import type { UsageFieldName } from './calc';
 import type { RecordFieldName } from './fields';
@@ -763,3 +763,44 @@ export interface MissingSubmitItemDto {
 export interface MissingSubmitListDto {
   items: readonly MissingSubmitItemDto[];
 }
+
+// ── 契约 §3.6 人员管理（GET/POST /admin/users、PATCH /admin/users/{id}；F6-02；TK-25）─────────
+
+/** GET /admin/users 单行（users 表查询面；passwordHash 凭证不出网） */
+export interface UserListItemDto {
+  id: number;
+  /** 登录名（C-05 实名一人一号，唯一） */
+  username: string;
+  real_name: string;
+  role: UserRole;
+  /** active 在用 / disabled 停用（停用即不可登录，契约 §1：服务端删除该用户全部 sessions 存根） */
+  status: UserStatus;
+  /** 开通时刻（users.created_at） */
+  created_at: string;
+}
+
+/** GET /admin/users 响应体（全量账号，id 升序 = 开通顺序；科长对师傅账号启停，科长行只读展示） */
+export interface UserListDto {
+  items: readonly UserListItemDto[];
+}
+
+/** POST /admin/users 请求体（F6-02「开通师傅账号」；角色恒 master，科长账号不走本接口开通，D-T25） */
+export interface UserCreatePayloadDto {
+  /** 登录名：1~32 位字母/数字/下划线（users.username varchar(32)，UNIQUE，重复 400 点名） */
+  username: string;
+  /** 姓名（实名制 C-05）：1~32 字 */
+  real_name: string;
+  /** 初始密码：8~64 字（bcrypt 加盐哈希落库，明文不回显不出网） */
+  password: string;
+}
+
+/** POST /admin/users 响应体（开通回执 = 创建后的账号行） */
+export type UserCreateResultDto = UserListItemDto;
+
+/** PATCH /admin/users/{id} 请求体（F6-02「停用/启用」：Phase 1 的账号管理动作仅状态启停一项，D-T25） */
+export interface UserStatusPatchPayloadDto {
+  status: UserStatus;
+}
+
+/** PATCH /admin/users/{id} 响应体（启停回执 = 更新后的账号行） */
+export type UserStatusPatchResultDto = UserListItemDto;

@@ -15,6 +15,10 @@ export type RecordStatus = (typeof RecordStatus)[number];
 export const UserRole = ['master', 'chief'] as const;
 export type UserRole = (typeof UserRole)[number];
 
+/** 账号状态（技术方案 §4.2 users.status）：active 在用 / disabled 停用（F6-02 停用即不可登录） */
+export const UserStatus = ['active', 'disabled'] as const;
+export type UserStatus = (typeof UserStatus)[number];
+
 /** 电梯运行计划类型（技术方案 §4.2 elevators.plan_type） */
 export const ElevatorPlanType = ['always', 'scheduled', 'stopped'] as const;
 export type ElevatorPlanType = (typeof ElevatorPlanType)[number];
