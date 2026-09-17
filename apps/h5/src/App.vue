@@ -30,6 +30,7 @@ import {
   type ConfirmItem,
   type ConfirmationPayload,
   type DecreasedGuardField,
+  type DutyGuardConfirm,
   type ElevatorCheckPayload,
   type ElevatorExpectedDto,
   type FieldValueGetter,
@@ -455,6 +456,14 @@ const confirmReasons = ref<Record<string, string>>({});
 const collectedConfirms = ref<ConfirmationPayload[]>([]);
 
 /**
+ * 排班安全阀确认（TK-26，F6-05）：submit/backfill 返 409 DUTY_MISMATCH（need_confirm 携
+ * type='duty_guard' 项，弹窗文案同 demo「今日排班为张师傅，您以施师傅身份提交，请确认实际
+ * 当班」）时，确认放行收集为 duty_guard_confirm 随重提上送（confirmed=true；原因选填，
+ * 非空随审计 record.guard_confirm 留痕）。取消 = 拒绝确认 = 不提交（F6-05-T2）。
+ */
+const collectedGuardConfirm = ref<DutyGuardConfirm | null>(null);
+
+/**
  * 提交 payload：**全字典合并视图（评审修复轮 M5）**——「草稿 ?? 服务端值」与首页角标同一
  * 取值口径，未填字段显式上送 null。单发草稿会漏掉服务端已有值（撤回重提时本机草稿已被
  * markSubmitted 清空，payload 近乎全空），单发服务端值则清空的字段会回落旧值；两者都不是
@@ -504,6 +513,8 @@ function buildPayload(): SubmitPayloadDto {
   if (Object.keys(prev_readings).length > 0) payload.prev_readings = prev_readings;
   if (elevator_checks.length > 0) payload.elevator_checks = elevator_checks;
   if (collectedConfirms.value.length > 0) payload.confirmations = collectedConfirms.value;
+  // 排班安全阀确认（TK-26，F6-05）：确认放行后随重提上送；未触发/已取消时为 null 不上送
+  if (collectedGuardConfirm.value) payload.duty_guard_confirm = collectedGuardConfirm.value;
   return payload;
 }
 
@@ -777,6 +788,7 @@ async function onConfirmSubmit(): Promise<void> {
     showPreview.value = false;
     offlinePreviewMode.value = false;
     collectedConfirms.value = [];
+    collectedGuardConfirm.value = null;
     pendingConfirms.value = null;
     showToast(
       cleared
@@ -851,20 +863,40 @@ function showServerMissingFields(err: ApiRequestError): void {
   showToast(err.body.message);
 }
 
-/** 防呆确认项的稳定键（原因收集与重提组装按项对应；gas_refill 无 field，按卡号区分） */
+/** 确认项的稳定键（原因收集与重提组装按项对应；gas_refill 无 field 按卡号、duty_guard 按排班人区分） */
 function confirmKeyOf(item: ConfirmItem): string {
-  return item.type === 'gas_refill' ? `gas_refill:${item.card}` : `reading_decreased:${item.field}`;
+  return item.type === 'gas_refill'
+    ? `gas_refill:${item.card}`
+    : item.type === 'duty_guard'
+      ? `duty_guard:${item.scheduled_name ?? ''}`
+      : `reading_decreased:${item.field}`;
 }
 
+/** 确认弹窗标题（duty_guard 与防呆共用一个弹窗容器，文案按项型分列） */
+const confirmTitle = computed(() => {
+  const items = pendingConfirms.value ?? [];
+  if (items.length > 0 && items.every((i) => i.type === 'duty_guard')) return '排班对账确认';
+  if (items.some((i) => i.type === 'duty_guard')) return '提交确认';
+  return '异常读数确认';
+});
+
 /**
- * 确认弹窗提交（F1-12-T1）：逐项收齐原因后组装 confirmations 并重提——原因随
- * audit_logs.reason 留痕；若服务端仍报 409（如另有命中项），确认弹窗会再次打开。
+ * 确认弹窗提交（F1-12-T1 / F6-05-T1）：逐项收齐原因后组装并重提——防呆确认原因随
+ * audit_logs.reason 留痕；duty_guard 项单独收集为 duty_guard_confirm（confirmed=true，
+ * 原因选填，audit record.guard_confirm 留痕）。若服务端仍报 409（如另有命中项），确认
+ * 弹窗会再次打开。
  */
 async function onConfirmResubmit(): Promise<void> {
   if (submitting.value) return;
   const list: ConfirmationPayload[] = [];
+  let guard: DutyGuardConfirm | null = null;
   for (const item of pendingConfirms.value ?? []) {
     const reason = (confirmReasons.value[confirmKeyOf(item)] ?? '').trim();
+    if (item.type === 'duty_guard') {
+      // 安全阀确认原因选填（demo 口径确认即放行留痕），与防呆确认的原因必填分列
+      guard = { confirmed: true, reason };
+      continue;
+    }
     if (reason === '') {
       showToast('请逐条填写确认原因');
       return;
@@ -889,14 +921,17 @@ async function onConfirmResubmit(): Promise<void> {
     else merged.push(c);
   }
   collectedConfirms.value = merged;
+  collectedGuardConfirm.value = guard;
   pendingConfirms.value = null;
   await onConfirmSubmit();
 }
 
-/** 取消确认：清未发送的确认清单（草稿不丢），回首页刷新——稍后可重新提交 */
+/** 取消确认：清未发送的确认清单（草稿不丢），回首页刷新——稍后可重新提交。
+ *  duty_guard 项一并清除 = 拒绝确认（F6-05-T2：不确认不提交） */
 async function onConfirmCancel(): Promise<void> {
   pendingConfirms.value = null;
   collectedConfirms.value = [];
+  collectedGuardConfirm.value = null;
   await loadToday();
 }
 
@@ -1187,7 +1222,8 @@ watch(
     </div>
   </div>
 
-  <!-- 防呆确认弹窗（TK-14，F1-12/F1-13）：409 need_confirm 逐条确认 + 原因必填，收集后重提 -->
+  <!-- 确认弹窗（TK-14 防呆 F1-12/F1-13 + TK-26 排班安全阀 F6-05）：409 need_confirm 逐条
+       确认（duty_guard 原因选填，其余原因必填），收集后重提 -->
   <div
     v-if="pendingConfirms && pendingConfirms.length > 0"
     class="fixed inset-0 z-50 flex items-end justify-center bg-black/40"
@@ -1195,7 +1231,7 @@ watch(
     <div class="max-h-[80vh] w-full overflow-y-auto rounded-t-2xl bg-white px-4 pb-6 pt-4">
       <div class="flex items-baseline justify-between">
         <div class="text-base font-bold text-slate-800" data-testid="confirm-title">
-          异常读数确认（{{ pendingConfirms.length }} 项）
+          {{ confirmTitle }}（{{ pendingConfirms.length }} 项）
         </div>
         <button
           type="button"
@@ -1206,21 +1242,31 @@ watch(
           取消
         </button>
       </div>
-      <div class="mt-1 text-xs text-slate-400">确认原因将写入审计日志（技术方案 §5.5）</div>
+      <div class="mt-1 text-xs text-slate-400">确认将写入审计日志（技术方案 §5.5）</div>
       <div
         v-for="item in pendingConfirms"
         :key="confirmKeyOf(item)"
-        class="mt-3 rounded-xl bg-amber-50 p-3"
+        class="mt-3 rounded-xl p-3"
+        :class="item.type === 'duty_guard' ? 'bg-sky-50' : 'bg-amber-50'"
         :data-testid="`confirm-item-${confirmKeyOf(item)}`"
       >
-        <div class="text-sm font-bold text-amber-700">{{ item.message }}</div>
+        <div
+          class="text-sm font-bold"
+          :class="item.type === 'duty_guard' ? 'text-sky-700' : 'text-amber-700'"
+        >
+          {{ item.message }}
+        </div>
         <van-field
           :model-value="confirmReasons[confirmKeyOf(item)] ?? ''"
           type="textarea"
           autosize
           rows="1"
           :maxlength="200"
-          placeholder="确认原因必填（如：上午充气 50 立方米）"
+          :placeholder="
+            item.type === 'duty_guard'
+              ? '调班/顶班说明（选填，将写入审计）'
+              : '确认原因必填（如：上午充气 50 立方米）'
+          "
           class="mt-2 rounded-lg bg-white px-3"
           :data-testid="`confirm-reason-${confirmKeyOf(item)}`"
           @update:model-value="(v: string) => (confirmReasons[confirmKeyOf(item)] = v)"
