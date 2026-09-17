@@ -171,6 +171,8 @@ describe('TK-23 管理后台框架与权限（接口）', () => {
         `GET ${MISSING_SUBMITS_API}`,
         'POST /api/v1/admin/records/:id/annotation',
         'GET /api/v1/admin/records/export',
+        'GET /api/v1/admin/schedules',
+        'PUT /api/v1/admin/schedules',
         'GET /api/v1/admin/users',
         'POST /api/v1/admin/users',
         'PATCH /api/v1/admin/users/:id',

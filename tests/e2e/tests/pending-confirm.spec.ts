@@ -6,7 +6,8 @@
  *
  * **断言策略：UI 与接口响应逐一对照**（同 today.spec.ts）——入口计数取
  * GET /records/pending 的真实响应比对，非硬编码期望值；本文件全部为只读浏览链路，
- * 不涉及提交类状态竞争，直接走真后端与真种子（D-1 待确认单，接收人=王师傅）。
+ * 不涉及提交类状态竞争，直接走真后端与真种子（D-1 待确认单；接收人经 chief 通道动态
+ * 反查——种子轮值相位变更不影响本文件，见 seedReceiver 注）。
  *
  * **不 import @handover/shared**：同 today.spec.ts 的外部观察者定位。
  *
@@ -27,6 +28,41 @@ interface PendingItem {
   alert_count: number;
 }
 
+/**
+ * 种子 D-1 待确认单的接班人（黑盒反查，不直查库——E2E 包无 mysql2 依赖，且比照
+ * 「UI 与接口响应逐一对照」策略）：chief 通道 GET /records?from/to=D-1 取 receiver
+ * 姓名经 GET /admin/users 映射回登录名。TK-26 起种子轮值相位锚定 D0=zhang（seed.ts 注），
+ * 接班人随轮值日期漂移，硬编码 'wang' 会随相位静默失效，故动态解析。
+ */
+async function seedReceiver(page: Page): Promise<{ username: string; others: string[] }> {
+  const d = new Date();
+  d.setDate(d.getDate() - 1);
+  const d1 = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const loginRes = await page.request.post('/api/v1/auth/login', {
+    data: { username: 'chief', password: PASSWORD },
+  });
+  expect(loginRes.ok()).toBeTruthy();
+  const usersRes = await page.request.get('/api/v1/admin/users');
+  expect(usersRes.status()).toBe(200);
+  const users = (await usersRes.json()) as {
+    items: Array<{ username: string; real_name: string; role: string }>;
+  };
+  const recRes = await page.request.get(`/api/v1/records?from=${d1}&to=${d1}`);
+  expect(recRes.status()).toBe(200);
+  const recs = (await recRes.json()) as {
+    items: Array<{ receiver: { real_name: string } | null }>;
+  };
+  const receiverName = recs.items[0]?.receiver?.real_name ?? '';
+  const byName = new Map(users.items.map((u) => [u.real_name, u.username]));
+  const username = byName.get(receiverName);
+  if (!username) throw new Error(`种子 D-1 接班人「${receiverName}」无对应账号（请重灌种子）`);
+  const masters = users.items.filter((u) => u.role === 'master').map((u) => u.username);
+  // 登出 chief（清除上下文 Cookie）：否则后续 page.goto('/') 直接进入已登录主界面，
+  // loginAs 的登录页 fill 永不出现
+  await page.request.post('/api/v1/auth/logout');
+  return { username, others: masters.filter((u) => u !== username) };
+}
+
 /** 登录并进入首页（登录响应本身即建立会话，Cookie 由浏览器上下文持有） */
 async function loginAs(page: Page, username: string): Promise<void> {
   await page.goto('/');
@@ -41,7 +77,7 @@ async function loginAs(page: Page, username: string): Promise<void> {
 
 test.describe('F2-02-T1：接班人登录 → 首页醒目"有 N 份交接单待确认"入口', () => {
   test('入口可见、文案计数与接口实际一致（UI == 服务端数据）', async ({ page }) => {
-    await loginAs(page, 'wang'); // 种子 D-1 待确认单的接班人
+    await loginAs(page, (await seedReceiver(page)).username); // 种子 D-1 待确认单的接班人
 
     // 接口实际值（登录后 Cookie 共享，page.request 同上下文）
     const res = await page.request.get('/api/v1/records/pending');
@@ -57,12 +93,13 @@ test.describe('F2-02-T1：接班人登录 → 首页醒目"有 N 份交接单待
   });
 
   test('无待确认单的师傅登录 → 不出现入口（不误导）', async ({ page }) => {
-    await loginAs(page, 'zhang'); // 种子中无以其为 receiver 的 submitted 记录
+    const { username, others } = await seedReceiver(page);
+    await loginAs(page, others.find((u) => u !== username) ?? 'zhang'); // 非接班人师傅
     await expect(page.getByTestId('pending-entry')).toHaveCount(0);
   });
 
   test('入口 → 列表 → 详情逐项浏览 → 返回，全链路可交互', async ({ page }) => {
-    await loginAs(page, 'wang');
+    await loginAs(page, (await seedReceiver(page)).username);
     await page.getByTestId('pending-entry').click();
     await expect(page.getByTestId('pending-list')).toBeVisible();
 

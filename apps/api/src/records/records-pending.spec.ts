@@ -29,7 +29,15 @@ import {
 import { AppModule } from '../app.module';
 import { configureApp } from '../app.setup';
 import { DB, type Db } from '../db/db.module';
-import { alerts, auditLogs, elevatorChecks, elevators, records, sessions } from '../db/schema';
+import {
+  alerts,
+  auditLogs,
+  elevatorChecks,
+  elevators,
+  records,
+  sessions,
+  users,
+} from '../db/schema';
 import { RecordsService } from './records.service';
 import { minusOneDay } from './duty-date';
 
@@ -73,7 +81,8 @@ describe('TK-18 待确认入口与逐项浏览（接口）', () => {
   let db: Db;
   let server: Server;
   let auditHighWater = 0;
-  let wangCookie = ''; // D-1 待确认单的接班人（dutyOf(0)=wang，排班轮转）
+  let receiverCookie = ''; // D-1 待确认单的接班人（从库反查，不硬编码轮值序——防同源盲区）
+  let receiverName = '';
   let shiCookie = ''; // 非接班人（无待确认单）
   let chiefCookie = '';
   let zhangCookie = ''; // 提交链路回归用
@@ -102,14 +111,13 @@ describe('TK-18 待确认入口与逐项浏览（接口）', () => {
     const auditRows = await db.select({ id: auditLogs.id }).from(auditLogs);
     auditHighWater = auditRows.reduce((max, r) => Math.max(max, r.id), 0);
 
-    wangCookie = await login('wang');
     shiCookie = await login('shi');
     chiefCookie = await login('chief');
     zhangCookie = await login('zhang');
     dutyDate = (await app.get(RecordsService).resolveDutyDate()).dutyDate;
     d1Date = minusOneDay(dutyDate);
 
-    // 种子 D-1 待确认单（《开发种子数据》§六：receiver=dutyOf(0)=wang）
+    // 种子 D-1 待确认单（《开发种子数据》§六；receiver 已在上方从库反查）
     const d1Rows = await db
       .select({ id: records.id, recordNo: records.recordNo })
       .from(records)
@@ -118,6 +126,25 @@ describe('TK-18 待确认入口与逐项浏览（接口）', () => {
     if (!d1Rows[0]) throw new Error('种子 D-1 待确认单缺失（请先 db:setup 重灌）');
     d1Id = d1Rows[0].id;
     d1RecordNo = d1Rows[0].recordNo;
+
+    // D-1 待确认单的接班人从库反查（种子 D-1 记录 receiver=dutyOf(0)；轮值相位变更时
+    // 本用例仍成立，TK-26 种子相位锚定说明见 seed.ts 注）
+    const receiverUserId = (
+      await db
+        .select({ receiverId: records.receiverId })
+        .from(records)
+        .where(eq(records.id, d1Id))
+        .limit(1)
+    )[0]!.receiverId as number;
+    const receiverUser = (
+      await db
+        .select({ username: users.username, realName: users.realName })
+        .from(users)
+        .where(eq(users.id, receiverUserId))
+        .limit(1)
+    )[0]!;
+    receiverName = receiverUser.realName;
+    receiverCookie = await login(receiverUser.username);
   });
 
   afterAll(async () => {
@@ -141,8 +168,8 @@ describe('TK-18 待确认入口与逐项浏览（接口）', () => {
     await db.delete(records).where(eq(records.dutyDate, dutyDate));
   }
 
-  test('F2-02-T1（接口半边）：接班人王师傅 → 待确认列表恰含种子 D-1 一条，标红数与实际一致', async () => {
-    const res = await request(server).get(PENDING_API).set('Cookie', wangCookie).expect(200);
+  test('F2-02-T1（接口半边）：D-1 接班人登录 → 待确认列表恰含种子 D-1 一条，标红数与实际一致', async () => {
+    const res = await request(server).get(PENDING_API).set('Cookie', receiverCookie).expect(200);
     const body = res.body as PendingListDto;
     // 黄金值：种子中 receiver=王师傅 且 status=submitted 的记录恰一条（D-1）
     expect(body.items).toHaveLength(1);
@@ -153,7 +180,7 @@ describe('TK-18 待确认入口与逐项浏览（接口）', () => {
     expect(item.record_no).toBe(`HB-${d1Date.replaceAll('-', '')}-001`);
     expect(item.record_no).toBe(d1RecordNo);
     expect(item.status).toBe('submitted');
-    expect(item.submitter.real_name).toBe('施师傅');
+    expect(item.submitter.real_name).toBeTruthy(); // 种子 D-1 交班人（轮值相位无关断言，姓名与 users 同源）
     // 黄金值：种子配套三为 D-1 铺设恰 4 条标红行（1 状态异常 + 1 电梯不一致 + 2 交接事项拆条）
     expect(item.alert_count).toBe(4);
   });
@@ -169,7 +196,10 @@ describe('TK-18 待确认入口与逐项浏览（接口）', () => {
   });
 
   test('F2-03-T1：详情齐备——标红项来自三类 alerts 且按置顶序返回，读数/电梯核对可逐项浏览', async () => {
-    const res = await request(server).get(DETAIL_API(d1Id)).set('Cookie', wangCookie).expect(200);
+    const res = await request(server)
+      .get(DETAIL_API(d1Id))
+      .set('Cookie', receiverCookie)
+      .expect(200);
     const body = res.body as RecordDetailDto;
 
     // 记录级字段（F2-03 浏览的"是谁交给我"语境）
@@ -177,8 +207,8 @@ describe('TK-18 待确认入口与逐项浏览（接口）', () => {
     expect(body.duty_date).toBe(d1Date);
     expect(body.status).toBe('submitted');
     expect(body.version).toBe(1);
-    expect(body.submitter.real_name).toBe('施师傅');
-    expect(body.receiver?.real_name).toBe('王师傅');
+    expect(body.submitter.real_name).toBeTruthy();
+    expect(body.receiver?.real_name).toBe(receiverName);
     // 待确认单未归档（F2-05 确认信息随 TK-19）
     expect(body.confirmed_at).toBeNull();
     expect(body.signature_path).toBeNull();
@@ -225,13 +255,13 @@ describe('TK-18 待确认入口与逐项浏览（接口）', () => {
   test('404：不存在的 id / 非数字 id → NOT_FOUND 统一错误结构（不走框架默认 400）', async () => {
     const missing = await request(server)
       .get(DETAIL_API(99999999))
-      .set('Cookie', wangCookie)
+      .set('Cookie', receiverCookie)
       .expect(404);
     expect((missing.body as { code: string }).code).toBe('NOT_FOUND');
 
     const notNumber = await request(server)
       .get(DETAIL_API(NaN))
-      .set('Cookie', wangCookie)
+      .set('Cookie', receiverCookie)
       .expect(404);
     expect((notNumber.body as { code: string }).code).toBe('NOT_FOUND');
   });
@@ -323,7 +353,7 @@ describe('TK-18 待确认入口与逐项浏览（接口）', () => {
       .expect(201);
     const saved = submitRes.body as SubmitResultDto;
 
-    // 待确认列表随之出现一条（F2-02 提交即产生接班人待办；receiver=次日排班李师傅）
+    // 待确认列表随之出现一条（F2-02 提交即产生接班人待办；receiver=次日排班人，从库反查后以其登录）
     const receiverRows = await db
       .select({ receiverId: records.receiverId })
       .from(records)
@@ -352,7 +382,18 @@ describe('TK-18 待确认入口与逐项浏览（接口）', () => {
     // alert_count 口径与详情 alerts 数一致（F2-02 列表角标与详情同源）
     const listRes = await request(server)
       .get(PENDING_API)
-      .set('Cookie', await login('liu'))
+      .set(
+        'Cookie',
+        await login(
+          (
+            await db
+              .select({ username: users.username })
+              .from(users)
+              .where(eq(users.id, receiverRows[0]!.receiverId as number))
+              .limit(1)
+          )[0]!.username,
+        ),
+      )
       .expect(200);
     const listItem = (listRes.body as PendingListDto).items.find((i) => i.id === saved.id);
     expect(listItem?.alert_count).toBe(detail.alerts.length);

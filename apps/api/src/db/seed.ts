@@ -87,10 +87,13 @@ async function main(): Promise<void> {
     number
   >;
 
-  // ── 二、排班：D-14 ～ D+7 共 22 天，zhang→shi→wang→liu 轮转 ──
+  // ── 二、排班：D-14 ～ D+7 共 22 天，zhang→shi→wang→liu 轮转（D0 = zhang）──
+  // 相位锚定 D0=zhang（TK-26 排班安全阀落地后的测试链路语义：种子 D0 排班人 = 接口层
+  // 提交类用例的默认登录人 zhang，「当班师傅提交」不再被安全阀 409 拦截；消费方一律
+  // 从库反查排班人，无硬编码，故相位变更对既有断言透明）
   const rotation = ['zhang', 'shi', 'wang', 'liu'];
   const dutyOf = (offset: number): number =>
-    uid[rotation[(((offset + 14) % 4) + 4) % 4] ?? 'zhang'] as number;
+    uid[rotation[((offset % 4) + 4) % 4] ?? 'zhang'] as number;
   await db.insert(schedules).values(
     Array.from({ length: 22 }, (_, i) => {
       const offset = i - 14;
