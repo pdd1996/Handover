@@ -26,7 +26,11 @@ import AuditView from './views/AuditView.vue';
 type Screen = 'booting' | 'login' | 'denied' | 'ready';
 
 const NAV = [
-  { key: 'records', title: '记录管理', sub: '查看 / 追溯全部交接记录（含应提交未提交提醒）' },
+  {
+    key: 'records',
+    title: '记录管理',
+    sub: '查看 / 筛选 / 导出 / 批注全部交接记录（含应提交未提交提醒）',
+  },
   { key: 'people', title: '人员与排班', sub: '师傅账号开通停用 · 最小排班表「日期→人」维护' },
   { key: 'config', title: '配置中心', sub: '阈值 / 清单 / 电梯字典统一维护，保存即全员生效' },
   { key: 'audit', title: '审计日志', sub: '谁在何时把什么配置从多少改成多少' },

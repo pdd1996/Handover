@@ -6,7 +6,14 @@
  * `credentials: 'include'` 让浏览器带上 `handover_sid`，前端代码接触不到令牌。
  * 响应类型取自 `@handover/shared`（与 api 端同一份契约类型，不另写 interface）。
  */
-import type { ApiError, MissingSubmitListDto, UserRole } from '@handover/shared';
+import type {
+  AnnotationResultDto,
+  ApiError,
+  MissingSubmitListDto,
+  RecordDetailDto,
+  RecordListDto,
+  UserRole,
+} from '@handover/shared';
 
 const BASE = '/api/v1';
 
@@ -82,5 +89,76 @@ export const api = {
    */
   missingSubmits(): Promise<MissingSubmitListDto> {
     return http('/admin/missing-submits');
+  },
+
+  /**
+   * GET /records —— 历史记录筛选（F6-01 科长半边 + F5-01 共用，契约 §3.5，TK-24）。
+   * 筛选参数 from/to/submitter_id/status 全部可选（服务端解析，非法 400 点名）；duty_date 倒序。
+   */
+  recordsList(
+    params: { from?: string; to?: string; submitter_id?: string; status?: string } = {},
+  ): Promise<RecordListDto> {
+    const qs = new URLSearchParams(
+      Object.entries(params).filter(([, v]) => v !== undefined && v !== '') as [string, string][],
+    ).toString();
+    return http(`/records${qs ? `?${qs}` : ''}`);
+  },
+
+  /** GET /records/{id} —— 交接单详情（F2-03/F5-01 共用视图，契约 §3.4） */
+  recordsDetail(id: number): Promise<RecordDetailDto> {
+    return http(`/records/${id}`);
+  },
+
+  /**
+   * POST /admin/records/{id}/annotation —— 科长批注（F6-01「批注」，契约 §3.6，TK-24/D-T24）：
+   * 覆盖式单条；空串 = 清除；留痕 audit `record.annotate`。
+   */
+  annotate(id: number, note: string): Promise<AnnotationResultDto> {
+    return http(`/admin/records/${id}/annotation`, {
+      method: 'POST',
+      body: JSON.stringify({ note }),
+    });
+  },
+
+  /**
+   * GET /admin/records/export —— 记录导出 CSV（F6-01「导出」，契约 §3.6，TK-24）。
+   * 响应为 CSV 附件（非 JSON），走独立通道：失败按契约 §2 解析业务错误，成功转 Blob
+   * 触发浏览器下载（文件名取 Content-Disposition，由服务端按筛选区间命名）。
+   */
+  async exportRecords(
+    params: { from?: string; to?: string; submitter_id?: string; status?: string } = {},
+  ): Promise<void> {
+    const qs = new URLSearchParams(
+      Object.entries(params).filter(([, v]) => v !== undefined && v !== '') as [string, string][],
+    ).toString();
+    let res: Response;
+    try {
+      res = await fetch(`${BASE}/admin/records/export${qs ? `?${qs}` : ''}`, {
+        credentials: 'include',
+      });
+    } catch (cause) {
+      throw new NetworkError(cause);
+    }
+    if (!res.ok) {
+      const text = await res.text();
+      let body: unknown = null;
+      try {
+        body = text === '' ? null : JSON.parse(text);
+      } catch {
+        body = null; // 非 JSON 错误体：保底走状态码分支
+      }
+      throw new ApiRequestError(res.status, body as ApiError);
+    }
+    const blob = await res.blob();
+    const filename =
+      /filename="([^"]+)"/.exec(res.headers.get('Content-Disposition') ?? '')?.[1] ?? 'records.csv';
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
   },
 };
