@@ -37,6 +37,8 @@ const props = defineProps<{
   queueCount?: number;
   /** 排空中（排空按钮 loading 与同步角标） */
   syncing?: boolean;
+  /** 本班次已成功上传（F1-06-T2）：在线提交或排空成功记下的 duty_date，跨班次自然失效 */
+  syncedDuty?: string | null;
   /** 待确认交接单数（TK-18，F2-02；GET /records/pending，仅 master 拉取） */
   pendingCount?: number;
   /** 撤回请求在途（TK-21，F2-08）：撤回按钮 loading 与防重点 */
@@ -167,6 +169,24 @@ const syncText = computed(() => {
 });
 
 /**
+ * 同步 chip 显隐（F1-06-T2 空态收敛）：同步语义只由待同步队列产生（D-T20），队列空、
+ * 当日 0 项已填且本班次未成功上传时「已同步」是空洞为真的陈述——无宾语易读作「交接单
+ * 已上传」，与旁边「尚未开始」并排自相矛盾。仅在四种有信息量的状态显示：排空中 /
+ * 待同步（接口 OR 本机队列）/ 当日已有填写内容 / 本班次已成功上传（排空与在线提交
+ * 成功到重拉完成的窗口内计数为 0，靠此标志保住「看到已同步方可下班」）。F1-06
+ * 「全程可见」的落地读法随之精确化为「存在待同步内容、填写内容或本班次已上传时
+ * 全程可见」（台账增补 #41）。
+ */
+const syncChipVisible = computed(
+  () =>
+    props.syncing ||
+    props.today.pending_sync ||
+    (props.pendingSync ?? false) ||
+    props.syncedDuty === props.today.duty_date ||
+    liveProgress.value.filled > 0,
+);
+
+/**
  * 撤回倒计时（TK-21，F2-09-T1「提交后查看撤回入口 → 显示剩余倒计时」）：
  * 仅当记录为 submitted 且提交了 submitted_at 时才有截止时刻（= submitted_at + 窗口分钟）。
  * 窗口值取接口回传的 withdraw_window_minutes（服务端读 configs，与撤回校验同源，F4-11）；
@@ -252,7 +272,11 @@ onUnmounted(stopWithdrawTimer);
           </div>
         </div>
         <div class="flex flex-col items-end gap-1.5">
-          <span class="rounded-full bg-white/20 px-2.5 py-1 text-xs" data-testid="sync-chip">
+          <span
+            v-if="syncChipVisible"
+            class="rounded-full bg-white/20 px-2.5 py-1 text-xs"
+            data-testid="sync-chip"
+          >
             ● {{ syncText }}
           </span>
           <span class="rounded-full bg-white/20 px-2.5 py-1 text-xs" data-testid="record-status">

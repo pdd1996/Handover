@@ -222,6 +222,13 @@ let patchedDuringSync = false;
 const deviceQueueCount = ref(0);
 /** F1-14 强提醒的会话内已知晓标记（M1 修复轮：跨班次单不可由师傅同步，提醒可确认后收起） */
 const syncRemindAck = ref(false);
+/**
+ * 本班次已成功上传（F1-06-T2 空态收敛配套）：在线提交或离线排空成功即记当前班次日期。
+ * 排空/提交成功到 loadToday 重拉完成之间存在「草稿已清、服务端值未到」的窗口，此刻
+ * 填写计数为 0，若无此标志同步 chip 会闪没一下——而「看到已同步方可下班」恰是培训口径
+ * （技术方案 §5.1）。存日期而非布尔：跨过班次分界（C-08）后与新 duty_date 不匹配自然失效。
+ */
+const syncedDutyDate = ref<string | null>(null);
 
 async function refreshQueue(): Promise<void> {
   queueItems.value = user.value ? await loadQueueItems(user.value.id) : [];
@@ -276,6 +283,7 @@ function resetSession(): void {
   syncing.value = false; // M5（评审修复轮）：登出/会话失效打断在途排空，不得残留锁
   sessionEpoch += 1;
   syncRemindAck.value = false;
+  syncedDutyDate.value = null; // F1-06-T2：会话级标志随登出清零
   draft.clearMemory();
   void refreshDeviceQueueCount(); // L5：回登录页时统计本机未同步单（不含内容）
 }
@@ -719,6 +727,7 @@ async function drainQueue(silent = false): Promise<void> {
       const note = patchedDuringSync ? '；注意：同步期间的新修改未包含在交接单中，请核对' : '';
       showToast(`同步成功，交接单已正式提交${synced > 1 ? ` ${synced} 张` : ''}${note}`);
       collectedConfirms.value = []; // M6：已消费的确认不得附着到后续提交
+      if (today.value) syncedDutyDate.value = today.value.duty_date; // F1-06-T2：排空成功即记班次
       await loadToday();
     } else if (user.value && !silent && blockedByNetwork) {
       // L3（评审修复轮）：手动同步但网络仍不可达，必须给出反馈
@@ -787,6 +796,7 @@ async function onConfirmSubmit(): Promise<void> {
     collectedConfirms.value = [];
     collectedGuardConfirm.value = null;
     pendingConfirms.value = null;
+    syncedDutyDate.value = today.value.duty_date; // F1-06-T2：在线提交成功与排空同口径记班次
     showToast(
       cleared
         ? `提交成功，交接单号 ${result.record_no}`
@@ -1084,6 +1094,7 @@ watch(
       :pending-sync="queueItems.length > 0"
       :queue-count="queueItems.length"
       :syncing="syncing"
+      :synced-duty="syncedDutyDate"
       :pending-count="pendingItems.length"
       :withdrawing="withdrawing"
       @open="openCard"
