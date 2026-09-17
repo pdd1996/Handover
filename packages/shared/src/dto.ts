@@ -425,6 +425,11 @@ export interface RecordDetailDto {
   /** 签名图路径（F2-05；未签名为 null） */
   signature_path: string | null;
   /**
+   * 科长批注（F6-01「批注」，TK-24）：records.chief_note 当前值——覆盖式单条，
+   * 清除后为 null；写入/清除/历次修改均以审计 `record.annotate` 留痕（契约 §5）。
+   */
+  chief_note: string | null;
+  /**
    * 历史版本摘要（F2-07-T1「历史版本可查」，TK-20 起）：按版本号降序；
    * 全字段快照留库（record_versions.snapshot），摘要见 RecordVersionSummaryDto。
    * 无修改历史（version=1 且未经历异议/撤回）为空数组。
@@ -686,6 +691,60 @@ export interface NotificationListDto {
 export interface NotificationReadResultDto {
   id: number;
   read_at: string;
+}
+
+// ── 契约 §3.5 GET /records（历史记录筛选；F5-01、F6-01；TK-24）─────────────────
+
+/**
+ * GET /records 的单行（历史记录列表）。取数口径（契约 §3.5）：`from/to/submitter_id/status`
+ * 四个可选筛选参数的交集，`duty_date` 倒序；师傅看全部、科长同（登录用户）。
+ * 本路由的 F6-01 半边（科长后台记录管理页）随 TK-24 落地；F5-01 半边（师傅端历史查询
+ * 界面）属 P2、随 TK-35——接口先行归 TK-24（科长筛选/导出与详情查看共用同一取数）。
+ */
+export interface RecordListItemDto {
+  id: number;
+  record_no: string;
+  duty_date: string;
+  status: RecordStatus;
+  version: number;
+  submitted_at: string | null;
+  /** 确认归档时刻（F2-05；未归档为 null） */
+  confirmed_at: string | null;
+  /** 交班人（C-05 实名） */
+  submitter: { id: number; real_name: string };
+  /** 接班人（带出或修改后；无排班为 null） */
+  receiver: { id: number; real_name: string } | null;
+  /** 标红确认项数（alerts 行数，与详情同源；无标红为 0） */
+  alert_count: number;
+  /**
+   * 科长批注（F6-01「批注」，TK-24）：records.chief_note 当前值——覆盖式单条，
+   * 历史经审计 `record.annotate`（旧值→新值）留痕；未批注为 null。
+   */
+  chief_note: string | null;
+}
+
+/** GET /records 响应体（按 duty_date 降序；不分页——班次一天一条，量级为日增 1 行） */
+export interface RecordListDto {
+  items: readonly RecordListItemDto[];
+}
+
+// ── 契约 §3.6 POST /admin/records/{id}/annotation（科长批注；F6-01；TK-24）─────────
+
+/** POST /admin/records/{id}/annotation 请求体（F6-01「批注」：科长对交接单的管理备注） */
+export interface AnnotationPayloadDto {
+  /**
+   * 批注内容：trim 后**空串 = 清除批注**（chief_note 置 NULL），非空 = 覆盖式写入
+   * （单条当前值，历史经审计 `record.annotate` 留痕）；上限 500 字（越界 400 点名）。
+   */
+  note: string;
+}
+
+/** POST /admin/records/{id}/annotation 响应体（批注回执；当前值经 GET /records 与详情可查） */
+export interface AnnotationResultDto {
+  id: number;
+  record_no: string;
+  /** 批注后的当前值（清除后为 null） */
+  chief_note: string | null;
 }
 
 // ── 契约 §3.6 GET /admin/missing-submits（应提交未提交视图；F6-06；TK-23）─────────
