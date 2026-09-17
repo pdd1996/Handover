@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Put, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Put, Query, UseGuards } from '@nestjs/common';
 import type {
   AcknowledgePayloadDto,
   AcknowledgeResultDto,
@@ -12,6 +12,7 @@ import type {
   PrevDto,
   PreviewDto,
   RecordDetailDto,
+  RecordListDto,
   RecordUpdatePayloadDto,
   RecordUpdateResultDto,
   ResubmitPayloadDto,
@@ -25,7 +26,7 @@ import { CurrentUser, Roles } from '../auth/decorators';
 import { RolesGuard } from '../auth/roles.guard';
 import { SessionGuard } from '../auth/session.guard';
 import type { SessionUser } from '../auth/auth.service';
-import { RecordsService } from './records.service';
+import { RecordsService, parseRecordListFilters } from './records.service';
 
 /**
  * 今日交接接口（TK-05）：契约 §3.2 首条路由，基础路径 /api/v1（§1，由 main.ts 设全局前缀）。
@@ -72,6 +73,22 @@ export class RecordsController {
   @Roles('master', 'chief')
   prev(): Promise<PrevDto> {
     return this.records.prev();
+  }
+
+  /**
+   * GET /api/v1/records —— 历史记录筛选（TK-24，契约 §3.5；F6-01 科长半边 + F5-01 共用）。
+   *
+   * 筛选参数 `from/to/submitter_id/status` 全部可选（非法取值 400 逐条点名，解析单一实现
+   * parseRecordListFilters，与 GET /admin/records/export 共用），duty_date 倒序。
+   * 角色列「登录用户」→ master/chief 均可（同 GET /records/{id} 口径）：科长后台记录管理页
+   * 本轮落地（F6-01），师傅端历史查询界面属 P2/TK-35，接口先行。
+   * 路由序：静态段，必须声明在 GET :id 之前（动态段吞并防范，同 today/pending）。
+   */
+  @Get()
+  @UseGuards(SessionGuard, RolesGuard)
+  @Roles('master', 'chief')
+  list(@Query() query: Record<string, string | undefined>): Promise<RecordListDto> {
+    return this.records.list(parseRecordListFilters(query));
   }
 
   /**

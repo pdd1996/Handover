@@ -1,8 +1,11 @@
-import { Controller, Get, UseGuards } from '@nestjs/common';
-import type { MissingSubmitListDto } from '@handover/shared';
-import { Roles } from '../auth/decorators';
+import { Body, Controller, Get, Param, Post, Query, Res, UseGuards } from '@nestjs/common';
+import type { Response } from 'express';
+import type { AnnotationResultDto, MissingSubmitListDto } from '@handover/shared';
+import { CurrentUser, Roles } from '../auth/decorators';
 import { RolesGuard } from '../auth/roles.guard';
 import { SessionGuard } from '../auth/session.guard';
+import type { SessionUser } from '../auth/auth.service';
+import { parseRecordListFilters, RecordsService } from '../records/records.service';
 import { AdminService } from './admin.service';
 
 /**
@@ -19,7 +22,10 @@ import { AdminService } from './admin.service';
 @UseGuards(SessionGuard, RolesGuard)
 @Roles('chief')
 export class AdminController {
-  constructor(private readonly admin: AdminService) {}
+  constructor(
+    private readonly admin: AdminService,
+    private readonly records: RecordsService,
+  ) {}
 
   /**
    * GET /api/v1/admin/missing-submits —— 应提交未提交视图（F6-06 后台半边）：
@@ -30,5 +36,50 @@ export class AdminController {
   @Get('missing-submits')
   missingSubmits(): Promise<MissingSubmitListDto> {
     return this.admin.missingSubmits();
+  }
+
+  /**
+   * GET /api/v1/admin/records/export —— 记录导出（TK-24，F6-01「导出」；契约订正 28）。
+   *
+   * 筛选参数与 GET /records 完全同形（from/to/submitter_id/status，解析单一实现
+   * parseRecordListFilters）；响应为 **CSV 附件**（UTF-8 带 BOM + CRLF，Excel 直接打开
+   * 不乱码），文件名按筛选区间命名（recordsExportCsv 注）。CSV 走 @Res 直写而非 Nest
+   * 拦截器序列化——二进制/文本附件非 JSON 业务体，错误仍经统一异常过滤器（400/403 族）。
+   * 「按月」为后台界面的默认区间（记录管理页日期范围默认当月），接口层接受任意日历区间。
+   */
+  @Get('records/export')
+  async recordsExport(
+    @Res() res: Response,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('submitter_id') submitterId?: string,
+    @Query('status') status?: string,
+  ): Promise<void> {
+    const { filename, body } = await this.admin.recordsExportCsv(
+      parseRecordListFilters({ from, to, submitter_id: submitterId, status }),
+    );
+    res
+      .status(200)
+      .set({
+        'Content-Type': 'text/csv; charset=utf-8',
+        'Content-Disposition': `attachment; filename="${filename}"`,
+      })
+      .send(body);
+  }
+
+  /**
+   * POST /api/v1/admin/records/{id}/annotation —— 科长批注（TK-24，F6-01「批注」；D-T24）。
+   *
+   * 覆盖式单条备注（records.chief_note）：trim 后空串 = 清除，≤500 字；写入/清除/历次
+   * 修改以审计 `record.annotate` 留痕（契约 §5）。写入逻辑在 RecordsService.annotate
+   * （记录域单一实现，404/400 口径与既有记录路由同族）；本路由仅薄委托 + 类级 chief 守卫。
+   */
+  @Post('records/:id/annotation')
+  annotate(
+    @CurrentUser() user: SessionUser,
+    @Param('id') id: string,
+    @Body() payload: { note: string },
+  ): Promise<AnnotationResultDto> {
+    return this.records.annotate(user, Number(id), payload);
   }
 }

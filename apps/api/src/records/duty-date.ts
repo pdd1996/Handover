@@ -62,6 +62,17 @@ export function minusDays(date: string, days: number): string {
 }
 
 /**
+ * 'YYYY-MM-DD' 日历有效性（Date 往返比对，拦 02-30、13 月、非日历形等；纯日历日无时刻分量，
+ * UTC 口径即可）。供提交/补交（TK-12/TK-16）与后台筛选参数（TK-24）共用的单一实现——
+ * 消费方勿另写日历校验（防漂移纪律同上）。
+ */
+export function isValidCalendarDate(s: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const t = new Date(`${s}T00:00:00Z`);
+  return !Number.isNaN(t.getTime()) && t.toISOString().slice(0, 10) === s;
+}
+
+/**
  * 取指定时区的当地日历日与当日分钟数。
  * 用 `hourCycle: 'h23'` 而非 `hour12: false`——后者在部分 ICU 下把午夜给成 `24:00`，会使分界判定错位。
  */

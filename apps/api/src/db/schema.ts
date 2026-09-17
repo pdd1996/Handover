@@ -97,6 +97,8 @@ export const records = mysqlTable(
     objectionNote: varchar('objection_note', { length: 500 }),
     objectionAt: datetime('objection_at', { mode: 'string' }),
     escalatedAt: datetime('escalated_at', { mode: 'string' }),
+    // 科长批注（F6-01，TK-24）：覆盖式单条当前值，写入/清除以 audit_logs `record.annotate` 留痕
+    chiefNote: varchar('chief_note', { length: 500 }),
     version: int('version').notNull().default(1),
 
     // 一、水

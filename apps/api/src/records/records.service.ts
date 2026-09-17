@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { and, asc, count, desc, eq, inArray, isNull, lt } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gte, inArray, isNull, lte, lt } from 'drizzle-orm';
 import { promises as fsp } from 'node:fs';
 import * as nodePath from 'node:path';
 import { alias, getTableConfig } from 'drizzle-orm/mysql-core';
@@ -36,6 +36,7 @@ import {
   parseNumeric,
   refillCardsOf,
   roundToScaleOf,
+  RecordStatus,
   toMissingField,
   unconfirmedNeedConfirmItems,
   needConfirmItemsExcludingHits,
@@ -48,6 +49,8 @@ import {
   type AlertDto,
   type AcknowledgePayloadDto,
   type AcknowledgeResultDto,
+  type AnnotationPayloadDto,
+  type AnnotationResultDto,
   type BackfillPayloadDto,
   type ConfirmPayloadDto,
   type ConfirmResultDto,
@@ -68,6 +71,8 @@ import {
   type PreviewDto,
   type RecordDetailDto,
   type RecordFieldName,
+  type RecordListItemDto,
+  type RecordListDto,
   type RecalcResultDto,
   type SectionNo,
   type SectionStateDto,
@@ -106,6 +111,7 @@ import {
 import {
   DEFAULT_BACKFILL_WINDOW_DAYS,
   DEFAULT_SHIFT_START,
+  isValidCalendarDate,
   minusDays,
   minusOneDay,
   plusOneDay,
@@ -116,12 +122,79 @@ import {
 type DbExecutor = Db | Parameters<Parameters<Db['transaction']>[0]>[0];
 
 /**
- * 'YYYY-MM-DD' → 日历有效性（Date 往返比对，拦 02-30、13 月等；与 isValidMeasuredAt 同一
- * 思路，UTC 口径即可——补交日期是纯日历日，无时刻分量）。
+ * 'YYYY-MM-DD' → 日历有效性（拦 02-30、13 月等）。校验本体已上移 duty-date `isValidCalendarDate`
+ * （TK-24 起后台筛选参数共用同一实现，单一权威防漂移）；此处保留「非法返回空串」的消费形态。
  */
 function calendarDateOf(s: string): string {
-  const t = new Date(`${s}T00:00:00Z`);
-  return Number.isNaN(t.getTime()) ? '' : t.toISOString().slice(0, 10);
+  return isValidCalendarDate(s) ? s : '';
+}
+
+// ── 历史记录筛选（GET /records 与 GET /admin/records/export 共用，TK-24；F5-01、F6-01）─────────
+
+/** GET /records 筛选参数（契约 §3.5：`from/to/submitter_id/status`，全部可选取交集） */
+export interface RecordListFilters {
+  from: string | null;
+  to: string | null;
+  submitterId: number | null;
+  status: RecordStatus | null;
+}
+
+/** 筛选参数点名项（查询参数非表单字段，锚点指向后台筛选栏） */
+const FILTER_BAD = (field: string, label: string): MissingField => ({
+  field: field as MissingTarget,
+  section: 0,
+  label,
+  anchor: '#records-filters',
+});
+
+/**
+ * 解析并校验 GET /records 与 GET /admin/records/export 的查询参数（单一实现，防两处口径漂移）。
+ * 全部可选：缺省/空串 = 不筛；非法取值（非日历日、非正整数、状态越值）→ 400 逐条点名——
+ * 静默忽略会让「筛选无结果」与「参数写错」不可分辨（C-09 可解释原则）。
+ */
+export function parseRecordListFilters(
+  query: Readonly<Record<string, string | undefined>>,
+): RecordListFilters {
+  const text = (k: string): string | null => {
+    const v = query[k]?.trim();
+    return v ? v : null;
+  };
+  const from = text('from');
+  if (from !== null && !isValidCalendarDate(from)) {
+    throw new ApiException(
+      'VALIDATION_OUT_OF_RANGE',
+      '筛选参数 from 不是合法日历日（YYYY-MM-DD）',
+      {
+        missingFields: [FILTER_BAD('from', '筛选起始日期')],
+      },
+    );
+  }
+  const to = text('to');
+  if (to !== null && !isValidCalendarDate(to)) {
+    throw new ApiException('VALIDATION_OUT_OF_RANGE', '筛选参数 to 不是合法日历日（YYYY-MM-DD）', {
+      missingFields: [FILTER_BAD('to', '筛选截止日期')],
+    });
+  }
+  const submitterRaw = text('submitter_id');
+  let submitterId: number | null = null;
+  if (submitterRaw !== null) {
+    const n = Number(submitterRaw);
+    if (!Number.isInteger(n) || n <= 0) {
+      throw new ApiException('VALIDATION_OUT_OF_RANGE', '筛选参数 submitter_id 须为正整数', {
+        missingFields: [FILTER_BAD('submitter_id', '交班人')],
+      });
+    }
+    submitterId = n;
+  }
+  const status = text('status');
+  if (status !== null && !(RecordStatus as readonly string[]).includes(status)) {
+    throw new ApiException(
+      'VALIDATION_OUT_OF_RANGE',
+      `筛选参数 status 取值越界（${status}），可选：${RecordStatus.join(' / ')}`,
+      { missingFields: [FILTER_BAD('status', '记录状态')] },
+    );
+  }
+  return { from, to, submitterId, status: (status ?? null) as RecordStatus | null };
 }
 
 /**
@@ -267,6 +340,13 @@ const OBJECTION_NOTE_MISSING = (): MissingField => ({
   section: 0,
   label: '异议原因',
   anchor: '#sec-0-objection-note',
+});
+
+const CHIEF_NOTE_MISSING = (): MissingField => ({
+  field: 'chief_note' as MissingTarget,
+  section: 0,
+  label: '批注内容',
+  anchor: '#sec-0-chief-note',
 });
 
 const USAGE_OVERRIDE_BAD_PAYLOAD = (): MissingField => ({
@@ -667,6 +747,144 @@ export class RecordsService {
   }
 
   /**
+   * GET /records（TK-24，契约 §3.5；F6-01 科长筛选半边 + F5-01 共用取数）。
+   *
+   * 筛选参数 `from/to/submitter_id/status` 全部可选取交集（解析与校验单一实现
+   * parseRecordListFilters，与导出共用），`duty_date` 倒序；不分页（班次一天一条，
+   * 量级日增 1 行，与 pending/notifications 同口径）。师傅看全部、科长同（登录用户）。
+   */
+  async list(filters: RecordListFilters): Promise<RecordListDto> {
+    const rows = await this.listRows(filters);
+    return {
+      items: rows.map((r) => ({
+        id: r.id,
+        record_no: r.recordNo,
+        duty_date: r.dutyDate,
+        status: r.status,
+        version: r.version,
+        submitted_at: r.submittedAt,
+        confirmed_at: r.confirmedAt,
+        submitter: { id: r.submitterId, real_name: r.submitterName },
+        receiver: r.receiverId === null ? null : { id: r.receiverId, real_name: r.receiverName! },
+        alert_count: r.alertCount,
+        chief_note: r.chiefNote,
+      })),
+    };
+  }
+
+  /**
+   * 导出取数（GET /admin/records/export 的数据半边，TK-24）：与 list 同一筛选与排序，
+   * 额外携带四项日用量原值（decimal 列字符串回读保精度）供 CSV 组装——
+   * 列表 DTO 不携带用量列（保持视图轻量），导出经本方法单独取数。
+   */
+  async exportRows(filters: RecordListFilters): Promise<
+    (RecordListItemDto & {
+      water_use: string | null;
+      e_use: string | null;
+      gas_use: string | null;
+      lo_day_use: string | null;
+    })[]
+  > {
+    const submitterU = alias(users, 'submitter_user');
+    const receiverU = alias(users, 'receiver_user');
+    const rows = await this.db
+      .select({
+        row: records,
+        submitterId: submitterU.id,
+        submitterName: submitterU.realName,
+        receiverName: receiverU.realName,
+      })
+      .from(records)
+      .innerJoin(submitterU, eq(records.submitterId, submitterU.id))
+      .leftJoin(receiverU, eq(records.receiverId, receiverU.id))
+      .where(this.listWhere(filters))
+      .orderBy(desc(records.dutyDate));
+    if (rows.length === 0) return [];
+
+    const countRows = await this.db
+      .select({ recordId: alerts.recordId, n: count(alerts.id) })
+      .from(alerts)
+      .where(
+        inArray(
+          alerts.recordId,
+          rows.map((r) => r.row.id),
+        ),
+      )
+      .groupBy(alerts.recordId);
+    const counts = new Map(countRows.map((c) => [c.recordId, Number(c.n)]));
+
+    return rows.map(({ row, submitterId, submitterName, receiverName }) => ({
+      id: row.id,
+      record_no: row.recordNo,
+      duty_date: row.dutyDate,
+      status: row.status,
+      version: row.version,
+      submitted_at: row.submittedAt,
+      confirmed_at: row.confirmedAt,
+      submitter: { id: submitterId, real_name: submitterName },
+      receiver:
+        row.receiverId === null ? null : { id: row.receiverId, real_name: receiverName ?? '' },
+      alert_count: counts.get(row.id) ?? 0,
+      chief_note: row.chiefNote,
+      water_use: row.waterUse,
+      e_use: row.eUse,
+      gas_use: row.gasUse,
+      lo_day_use: row.loDayUse,
+    }));
+  }
+
+  /** list/exportRows 共用的筛选条件（单一实现，防列表与导出口径漂移） */
+  private listWhere(filters: RecordListFilters) {
+    const conds = [];
+    if (filters.from !== null) conds.push(gte(records.dutyDate, filters.from));
+    if (filters.to !== null) conds.push(lte(records.dutyDate, filters.to));
+    if (filters.submitterId !== null) conds.push(eq(records.submitterId, filters.submitterId));
+    if (filters.status !== null) conds.push(eq(records.status, filters.status));
+    return conds.length > 0 ? and(...conds) : undefined;
+  }
+
+  /** list 的取数本体（联双方姓名 + 标红行数聚合，一次 group by 不 N+1） */
+  private async listRows(filters: RecordListFilters) {
+    const submitterU = alias(users, 'submitter_user');
+    const receiverU = alias(users, 'receiver_user');
+    const rows = await this.db
+      .select({
+        id: records.id,
+        recordNo: records.recordNo,
+        dutyDate: records.dutyDate,
+        status: records.status,
+        version: records.version,
+        submittedAt: records.submittedAt,
+        confirmedAt: records.confirmedAt,
+        chiefNote: records.chiefNote,
+        submitterId: submitterU.id,
+        submitterName: submitterU.realName,
+        receiverId: records.receiverId,
+        receiverName: receiverU.realName,
+      })
+      .from(records)
+      .innerJoin(submitterU, eq(records.submitterId, submitterU.id))
+      .leftJoin(receiverU, eq(records.receiverId, receiverU.id))
+      .where(this.listWhere(filters))
+      .orderBy(desc(records.dutyDate));
+    if (rows.length === 0) return [];
+
+    const countRows = await this.db
+      .select({ recordId: alerts.recordId, n: count(alerts.id) })
+      .from(alerts)
+      .where(
+        inArray(
+          alerts.recordId,
+          rows.map((r) => r.id),
+        ),
+      )
+      .groupBy(alerts.recordId);
+    const counts = new Map(countRows.map((c) => [c.recordId, Number(c.n)]));
+
+    return rows.map((r) => ({ ...r, alertCount: counts.get(r.id) ?? 0 }));
+  }
+
+  /**
    * GET /records/{id}（F2-03 逐项浏览、F5-01 历史详情共用，契约 §3.4「含全部读数、
    * 标红项（alerts）、电梯核对、版本摘要、双方确认信息」）。
    *
@@ -777,6 +995,7 @@ export class RecordsService {
       elevator_checks: checks,
       confirmed_at: row.confirmedAt,
       signature_path: row.signaturePath,
+      chief_note: row.chiefNote,
       versions,
     };
   }
@@ -1073,6 +1292,56 @@ export class RecordsService {
       objection_note: note,
       objection_at: objectionAt,
     } satisfies ObjectionResultDto;
+  }
+
+  /**
+   * POST /admin/records/{id}/annotation（TK-24，契约 §3.6；F6-01「批注」、D-T24）。
+   *
+   * 科长对交接单的管理备注：**覆盖式单条**（records.chief_note 当前值），trim 后空串 =
+   * 清除（置 NULL），≤500 字（越界 400 点名 chief_note，同 objection_note 容量口径）。
+   * **不限记录状态**——draft（撤回未重提）单上批注「请尽快重提」是合法管理动作；
+   * 值无变化不更新不写审计（D-T21 M1 数值判等同一精神，防重复提交制造审计噪音）；
+   * 写入/清除/历次修改均以审计 `record.annotate` 留痕（oldValue/newValue 携 note 前后值，
+   * 契约 §5），批注不进 record_versions（非交接单数据变更，version 不动）。
+   * 404 口径与 detail 同一（非数字 id 一并 404）。
+   */
+  async annotate(
+    user: SessionUser,
+    id: number,
+    payload: AnnotationPayloadDto,
+  ): Promise<AnnotationResultDto> {
+    if (!Number.isInteger(id) || id <= 0) {
+      throw new ApiException('NOT_FOUND', '交接单不存在或已被删除');
+    }
+    const note = typeof payload?.note === 'string' ? payload.note.trim() : '';
+    if (note.length > 500) {
+      throw new ApiException('VALIDATION_OUT_OF_RANGE', '批注内容过长（上限 500 字）', {
+        missingFields: [CHIEF_NOTE_MISSING()],
+      });
+    }
+    return this.db.transaction(async (tx) => {
+      const locked = await tx
+        .select({ recordNo: records.recordNo, chiefNote: records.chiefNote })
+        .from(records)
+        .where(eq(records.id, id))
+        .limit(1)
+        .for('update');
+      const row = locked[0];
+      if (!row) throw new ApiException('NOT_FOUND', '交接单不存在或已被删除');
+      const next = note === '' ? null : note;
+      if (row.chiefNote !== next) {
+        await tx.update(records).set({ chiefNote: next }).where(eq(records.id, id));
+        await tx.insert(auditLogs).values({
+          actorId: user.id,
+          action: 'record.annotate',
+          targetType: 'record',
+          targetId: row.recordNo,
+          oldValue: { note: row.chiefNote },
+          newValue: { note: next },
+        });
+      }
+      return { id, record_no: row.recordNo, chief_note: next } satisfies AnnotationResultDto;
+    });
   }
 
   /**

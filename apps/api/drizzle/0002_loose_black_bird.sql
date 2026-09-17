@@ -1,0 +1,1 @@
+ALTER TABLE `records` ADD `chief_note` varchar(500);
