@@ -165,10 +165,12 @@ describe('TK-23 管理后台框架与权限（接口）', () => {
   describe('chief 角色守卫（C-05、契约 §3.6）：师傅访问后台接口一律 403', () => {
     it('路由完备性哨兵：Nest 实际注册的 /admin 路由 == 契约 §3.6 当前已落地清单', () => {
       const routes = discoverAdminRoutes(containerRef);
-      // TK-24~29 落地用户/排班/电梯/点位/配置/审计/导出等后台路由后，此处须同步扩入
+      // TK-24~29 落地用户/排班/电梯/点位/配置/审计等后台路由后，此处须同步扩入
       //（哨兵红 = 有新后台路由未进权限矩阵，「一律 403」承诺须重新断言）
       expect(routes.map((r) => `${r.verb.toUpperCase()} ${r.url}`)).toEqual([
         `GET ${MISSING_SUBMITS_API}`,
+        'POST /api/v1/admin/records/:id/annotation',
+        'GET /api/v1/admin/records/export',
       ]);
     });
 
