@@ -187,8 +187,8 @@ export type FormOptionsDto = {
  * `lo_measured_am/pm` 相反——本机测量时刻即唯一权威（D-P12/契约 §4 补充口径），
  * 服务端原样落库、不得以同步时刻覆盖（DATA-13-T2）。
  *
- * `confirmations[]` / `duty_guard_confirm` 为 TK-14 防呆与 TK-26 排班安全阀的确认载体：
- * 本阶段服务端仅接收不判定（防呆三则属 TK-14、安全阀属 TK-26），字段先行以稳定契约形状。
+ * `confirmations[]`（TK-14 防呆）与 `duty_guard_confirm`（TK-26 排班安全阀）为两类 409 的
+ * 确认载体：409 need_confirm 弹窗逐条收集后随重提上送，消费口径见各字段注。
  */
 export interface SubmitPayloadDto {
   /** 十板块表单值（字段字典内的 records 列名 → 原值；字典外键忽略） */
@@ -207,9 +207,15 @@ export interface SubmitPayloadDto {
    * 审计留痕（F3-04-T2）。合法键集 shared `USAGE_FIELDS`。
    */
   usage_overrides?: readonly UsageOverridePayload[];
-  /** 防呆确认（TK-14 消费）；本阶段仅接收 */
+  /** 防呆确认（TK-14 消费） */
   confirmations?: readonly ConfirmationPayload[];
-  /** 排班安全阀确认（TK-26 消费，F6-05）；本阶段仅接收 */
+  /**
+   * 排班安全阀确认（TK-26 消费，F6-05）：登录提交人 ≠ 该班次排班人时 submit/backfill 返
+   * 409 DUTY_MISMATCH（need_confirm 携排班人），客户端确认后随重提上送本字段放行——
+   * `confirmed !== true` 不放行（拒绝确认/未确认均拦，F6-05-T2）；`reason` 选填
+   * （demo 口径确认即放行留痕，非空随审计 record.guard_confirm 的 reason 列留痕）。
+   * 排班与本登录人一致时本字段被忽略（不写审计，同「未命中确认不入账」口径）。
+   */
   duty_guard_confirm?: DutyGuardConfirm;
   /**
    * 补录上一班读数（TK-14，F3-07）：上一班缺失（GET /records/today/prev 返回 prev=null
@@ -804,3 +810,50 @@ export interface UserStatusPatchPayloadDto {
 
 /** PATCH /admin/users/{id} 响应体（启停回执 = 更新后的账号行） */
 export type UserStatusPatchResultDto = UserListItemDto;
+
+// ── 契约 §3.6 排班管理（GET/PUT /admin/schedules；F6-03/F6-04；TK-26）─────────
+
+/**
+ * GET /admin/schedules 单行（schedules 行查询面）。月视图为**稀疏列示**——仅列该月内
+ * 有排班的日期（无排班日不出行，前端渲染空位）；一天一人（duty_date UNIQUE，契约 §3.6）。
+ */
+export interface ScheduleItemDto {
+  /** 值班日期（C-08 班次起始日同语义；接班人带出取其 +1 天行，F2-01） */
+  duty_date: string;
+  /** 值班师傅用户 id */
+  user_id: number;
+  /** 值班师傅姓名（联 users 回显；停用账号的历史排班仍回显原名） */
+  real_name: string;
+  /** 排班最后修改时刻（schedules.updated_at；从未改动为 null） */
+  updated_at: string | null;
+}
+
+/** GET /admin/schedules 响应体（`?month=YYYY-MM` 缺省当前墙钟月；duty_date 升序） */
+export interface ScheduleMonthDto {
+  /** 查询月份回显（YYYY-MM，服务端归一后返回——前端据此核对与上/下月翻页） */
+  month: string;
+  items: readonly ScheduleItemDto[];
+}
+
+/**
+ * PUT /admin/schedules 请求体（F6-03「科长维护，改即审计」）：**单日单条**维护——
+ * 一次 PUT 改一天（月视图逐日行内下拉直改，demo 口径），同日已有排班即为改派
+ * （upsert，非追加）；同值重复 PUT 值无变化不写审计（D-T21 M1 同一精神）。
+ */
+export interface SchedulePutPayloadDto {
+  /** 值班日期（YYYY-MM-DD 日历有效；非日历日 400 点名 duty_date） */
+  duty_date: string;
+  /** 值班师傅（须为存在的师傅账号；chief 目标与未知 id 400 点名 user_id） */
+  user_id: number;
+}
+
+/** PUT /admin/schedules 响应体（维护回执；changed=false 即值无变化、未写审计） */
+export interface SchedulePutResultDto {
+  duty_date: string;
+  user_id: number;
+  real_name: string;
+  /** 本次是否实际变更（同值重复 PUT 为 false 且不写审计） */
+  changed: boolean;
+  /** 排班最后修改时刻（本次变更即当前时刻；从未改动的旧行为 null） */
+  updated_at: string | null;
+}
