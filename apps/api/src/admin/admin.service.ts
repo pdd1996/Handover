@@ -1,19 +1,65 @@
-import { Injectable } from '@nestjs/common';
-import type { MissingSubmitItemDto, MissingSubmitListDto, RecordStatus } from '@handover/shared';
+import { Inject, Injectable } from '@nestjs/common';
+import { asc, eq } from 'drizzle-orm';
+import bcrypt from 'bcryptjs';
+import type {
+  MissingField,
+  MissingSubmitItemDto,
+  MissingSubmitListDto,
+  RecordStatus,
+  UserCreatePayloadDto,
+  UserCreateResultDto,
+  UserListItemDto,
+  UserListDto,
+  UserStatusPatchPayloadDto,
+  UserStatusPatchResultDto,
+} from '@handover/shared';
+import { ApiException } from '../common/api-error';
+import { DB, type Db } from '../db/db.module';
+import { auditLogs, users } from '../db/schema';
+import { AuthService, type SessionUser } from '../auth/auth.service';
 import type { RecordListFilters } from '../records/records.service';
 import { RecordsService } from '../records/records.service';
 import { NotificationsService } from '../notifications/notifications.service';
 
 /**
- * 管理后台服务（TK-23 起架、TK-24 扩记录管理）：契约 §3.6 已落地路由的查询/组装层。
- * 记录域取数复用 RecordsService 单一实现（列表筛选、导出取数、批注写入均在 records 模块，
- * admin 仅做后台侧编排——CSV 形态与文件名是后台展示关注点，落在本服务）。
+ * 人员表单点名项（username/real_name/password/status 非交接单表单字段，锚点指向后台
+ * 人员管理表单栏；FILTER_BAD 同式先例，records.service.ts）。
+ */
+const USER_BAD = (field: string, label: string): MissingField => ({
+  field: field as MissingField['field'],
+  section: 0,
+  label,
+  anchor: '#people-form',
+});
+
+/** username 规则：1~32 位字母/数字/下划线（users.username varchar(32) UNIQUE，D-T25 ①） */
+const USERNAME_RE = /^\w{1,32}$/;
+
+/** 初始密码长度界（D-T25 ①）：8~64 字；bcrypt 加盐哈希落库，明文不落库不回显 */
+const PASSWORD_MIN = 8;
+const PASSWORD_MAX = 64;
+
+/** 审计 `user.update`（契约 §5）的新旧值载荷（开通/启停共用同一 action，D-T25 ④） */
+type UserAuditValue = {
+  username?: string;
+  real_name?: string;
+  role?: string;
+  status?: string;
+};
+
+/**
+ * 管理后台服务（TK-23 起架、TK-24 扩记录管理、TK-25 扩人员管理）：契约 §3.6 已落地路由
+ * 的查询/组装层。记录域取数复用 RecordsService 单一实现（列表筛选、导出取数、批注写入
+ * 均在 records 模块，admin 仅做后台侧编排——CSV 形态与文件名是后台展示关注点，落在本服务）；
+ * 人员管理为 admin 域自有实现（账号启停联动 AuthService 的会话存根吊销，D-T25）。
  */
 @Injectable()
 export class AdminService {
   constructor(
+    @Inject(DB) private readonly db: Db,
     private readonly notifications: NotificationsService,
     private readonly records: RecordsService,
+    private readonly auth: AuthService,
   ) {}
 
   /**
@@ -99,5 +145,173 @@ export class AdminService {
     }
     const today = now.toISOString().slice(0, 10);
     return `records-${today.replaceAll('-', '')}.csv`;
+  }
+
+  // ── 人员管理（F6-02，TK-25；契约 §3.6 GET/POST /admin/users、PATCH /admin/users/{id}）─────
+
+  /** users 行 → 契约查询面（passwordHash 凭证不出网；datetime 列读回 string 原样出网） */
+  private static toItem(row: typeof users.$inferSelect): UserListItemDto {
+    return {
+      id: row.id,
+      username: row.username,
+      real_name: row.realName,
+      role: row.role,
+      status: row.status,
+      created_at: row.createdAt,
+    };
+  }
+
+  /**
+   * GET /admin/users（F6-02 查询半边）：全量账号，id 升序（= 开通顺序）。含科长行——
+   * 列表是账号全景的只读展示面（role/status 列透明），启停操作仅对师傅账号开放（见
+   * userPatchStatus 的 chief 403 门）；前端师傅卡按 demo 口径只对 master 渲染启停按钮。
+   */
+  async usersList(): Promise<UserListDto> {
+    const rows = await this.db.select().from(users).orderBy(asc(users.id));
+    return { items: rows.map(AdminService.toItem) };
+  }
+
+  /**
+   * POST /admin/users（F6-02「开通」，D-T25 ①）：开通**师傅账号**——角色恒 master
+   * （科长账号经部署初始化发放，不走本接口；payload 中的多余字段一律忽略，同全站口径），
+   * 初始状态 active。校验：username 1~32 位字母/数字/下划线、real_name 1~32 字、
+   * 初始密码 8~64 字，违规 400 逐条点名（USER_BAD 锚点指向后台人员表单栏）；username
+   * 重复 400 点名（预查 + 捕获 ER_DUP_ENTRY 兜并发窗口，消息一致不泄露竞争细节）。
+   * 密码 bcrypt 加盐哈希（cost 10，与登录侧 DUMMY_HASH 同 cost）落库，明文不落库不回显。
+   * 审计 `user.update`（契约 §5 既有行，D-T25 ④）：oldValue=null、newValue 携开通值，
+   * 操作人与时刻即 actor_id / created_at（F6-02-T1「记录操作人、时间」）。
+   */
+  async userCreate(
+    actor: SessionUser,
+    payload: UserCreatePayloadDto,
+  ): Promise<UserCreateResultDto> {
+    const username = typeof payload?.username === 'string' ? payload.username.trim() : '';
+    const realName = typeof payload?.real_name === 'string' ? payload.real_name.trim() : '';
+    const password = typeof payload?.password === 'string' ? payload.password : '';
+
+    const missing: MissingField[] = [];
+    if (!USERNAME_RE.test(username)) {
+      missing.push(USER_BAD('username', '登录名（1~32 位字母/数字/下划线）'));
+    }
+    if (realName.length < 1 || realName.length > 32) {
+      missing.push(USER_BAD('real_name', '姓名（1~32 字）'));
+    }
+    if (password.length < PASSWORD_MIN || password.length > PASSWORD_MAX) {
+      missing.push(USER_BAD('password', `初始密码（${PASSWORD_MIN}~${PASSWORD_MAX} 字）`));
+    }
+    if (missing.length > 0) {
+      throw new ApiException('VALIDATION_OUT_OF_RANGE', '开通信息不完整或不合规', {
+        missingFields: missing,
+      });
+    }
+
+    const dup = await this.db
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.username, username))
+      .limit(1);
+    if (dup.length > 0) {
+      throw new ApiException('VALIDATION_OUT_OF_RANGE', `登录名 ${username} 已存在`, {
+        missingFields: [USER_BAD('username', '登录名（不得与现有账号重复）')],
+      });
+    }
+
+    const passwordHash = bcrypt.hashSync(password, 10);
+    try {
+      await this.db
+        .insert(users)
+        .values({ username, realName, role: 'master', passwordHash, status: 'active' });
+    } catch (err) {
+      if ((err as { code?: string }).code === 'ER_DUP_ENTRY') {
+        throw new ApiException('VALIDATION_OUT_OF_RANGE', `登录名 ${username} 已存在`, {
+          missingFields: [USER_BAD('username', '登录名（不得与现有账号重复）')],
+        });
+      }
+      throw err;
+    }
+    // MySQL insert 无 returning：回查创建行（username UNIQUE 定位唯一）
+    const createdRows = await this.db
+      .select()
+      .from(users)
+      .where(eq(users.username, username))
+      .limit(1);
+    const created = createdRows[0]!;
+
+    await this.db.insert(auditLogs).values({
+      actorId: actor.id,
+      action: 'user.update',
+      targetType: 'user',
+      targetId: String(created.id),
+      oldValue: null,
+      newValue: {
+        username,
+        real_name: realName,
+        role: 'master',
+        status: 'active',
+      } satisfies UserAuditValue,
+    });
+    return AdminService.toItem(created);
+  }
+
+  /**
+   * PATCH /admin/users/{id}（F6-02「停用/启用」，D-T25 ②③）：Phase 1 的账号管理动作仅
+   * 状态启停一项。口径：
+   * - body `{status: 'active'|'disabled'}`，越值 400 点名 status；非数字/未知 id 404
+   *   （同 GET /records/{id} 既有口径）；
+   * - **仅师傅账号可操作**：目标为 chief → 403 FORBIDDEN（F6-02 范围 = 师傅账号；科长账号
+   *   生命周期经部署初始化发放，科长误停自己/另一科长由此门拦下）；
+   * - **值无变化不更新不写审计**（D-T21 M1 同一精神，TK-24 annotate 先例）；
+   * - **停用即不可登录（D-T13）**：状态改 disabled 与审计同事务提交后，删除该用户全部
+   *   sessions 存根（AuthService.revokeAllForUser 单一实现）——已在线设备下一次请求即 401；
+   *   会话解析侧另有「status=disabled → 再吊销一次」双保险兜并发窗口；
+   * - 变更审计 `user.update`：oldValue/newValue 携 status 前后值（契约 §5「新旧值」）。
+   */
+  async userPatchStatus(
+    actor: SessionUser,
+    id: number,
+    payload: UserStatusPatchPayloadDto,
+  ): Promise<UserStatusPatchResultDto> {
+    if (!Number.isInteger(id) || id <= 0) {
+      throw new ApiException('NOT_FOUND', '账号不存在或已被删除');
+    }
+    const status = payload?.status;
+    if (status !== 'active' && status !== 'disabled') {
+      throw new ApiException(
+        'VALIDATION_OUT_OF_RANGE',
+        `账号状态取值越界，可选：active / disabled`,
+        {
+          missingFields: [USER_BAD('status', '账号状态（active 在用 / disabled 停用）')],
+        },
+      );
+    }
+
+    const changed = await this.db.transaction(async (tx) => {
+      const locked = await tx.select().from(users).where(eq(users.id, id)).limit(1).for('update');
+      const row = locked[0];
+      if (!row) throw new ApiException('NOT_FOUND', '账号不存在或已被删除');
+      if (row.role === 'chief') {
+        throw new ApiException('FORBIDDEN', '科长账号不随本接口启停（本接口管理范围为师傅账号）');
+      }
+      if (row.status === status) return false;
+      await tx.update(users).set({ status }).where(eq(users.id, id));
+      await tx.insert(auditLogs).values({
+        actorId: actor.id,
+        action: 'user.update',
+        targetType: 'user',
+        targetId: String(row.id),
+        oldValue: { status: row.status } satisfies UserAuditValue,
+        newValue: { status } satisfies UserAuditValue,
+      });
+      return true;
+    });
+
+    // 提交后再吊销存根：失败也不破坏正确性——resolveSession 对 status=disabled 的双保险
+    // 会在该账号下一次请求时再吊销并 401（AuthService.resolveSession，D-T13）
+    if (changed && status === 'disabled') {
+      await this.auth.revokeAllForUser(id);
+    }
+
+    const rows = await this.db.select().from(users).where(eq(users.id, id)).limit(1);
+    return AdminService.toItem(rows[0]!);
   }
 }

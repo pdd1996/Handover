@@ -1,6 +1,14 @@
-import { Body, Controller, Get, Param, Post, Query, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Query, Res, UseGuards } from '@nestjs/common';
 import type { Response } from 'express';
-import type { AnnotationResultDto, MissingSubmitListDto } from '@handover/shared';
+import type {
+  AnnotationResultDto,
+  MissingSubmitListDto,
+  UserCreatePayloadDto,
+  UserCreateResultDto,
+  UserListDto,
+  UserStatusPatchPayloadDto,
+  UserStatusPatchResultDto,
+} from '@handover/shared';
 import { CurrentUser, Roles } from '../auth/decorators';
 import { RolesGuard } from '../auth/roles.guard';
 import { SessionGuard } from '../auth/session.guard';
@@ -36,6 +44,43 @@ export class AdminController {
   @Get('missing-submits')
   missingSubmits(): Promise<MissingSubmitListDto> {
     return this.admin.missingSubmits();
+  }
+
+  /**
+   * GET /api/v1/admin/users —— 账号全景（F6-02 查询半边，TK-25；契约 §3.6）：
+   * 全量账号 id 升序（= 开通顺序），role/status 列透明；启停操作仅对师傅账号开放
+   * （PATCH 侧 chief 目标 403，D-T25 ②）。
+   */
+  @Get('users')
+  usersList(): Promise<UserListDto> {
+    return this.admin.usersList();
+  }
+
+  /**
+   * POST /api/v1/admin/users —— 开通师傅账号（F6-02「开通」，TK-25；D-T25 ①）：
+   * 角色恒 master、初始密码 bcrypt 落库、审计 `user.update` 留痕（契约 §5）。
+   * 校验/重复名 400 点名等业务口径在 AdminService.userCreate（同 annotate 薄委托纪律）。
+   */
+  @Post('users')
+  userCreate(
+    @CurrentUser() user: SessionUser,
+    @Body() payload: UserCreatePayloadDto,
+  ): Promise<UserCreateResultDto> {
+    return this.admin.userCreate(user, payload);
+  }
+
+  /**
+   * PATCH /api/v1/admin/users/{id} —— 停用/启用（F6-02「停用即不可登录」，TK-25；D-T25 ②③）：
+   * 停用与审计同事务、提交后删除该账号全部 sessions 存根（D-T13，已在线设备下一次请求
+   * 即 401）；chief 目标 403；值无变化不写审计。
+   */
+  @Patch('users/:id')
+  userPatchStatus(
+    @CurrentUser() user: SessionUser,
+    @Param('id') id: string,
+    @Body() payload: UserStatusPatchPayloadDto,
+  ): Promise<UserStatusPatchResultDto> {
+    return this.admin.userPatchStatus(user, Number(id), payload);
   }
 
   /**
