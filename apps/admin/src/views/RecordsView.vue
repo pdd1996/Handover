@@ -225,7 +225,7 @@ onMounted(() => {
       </template>
       <div class="text-xs text-gray-400 mb-3">
         定时任务按排班表扫描：班次日期已过约定时点（默认次日
-        9:00，可调）仍无已提交记录即提醒（F6-06，数据源与站内通知同源）。
+        9:00，可调）仍无已提交记录即提醒。
       </div>
       <el-table
         v-if="missingItems.length > 0"

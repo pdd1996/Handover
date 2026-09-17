@@ -80,9 +80,6 @@ const activeCard = computed(
   () => today.value?.cards.find((c) => c.key === activeCardKey.value) ?? null,
 );
 
-/** 开发构建标记（Vite 标准）：生产构建不含种子账号提示，避免泄露开发凭据线索 */
-const isDev = import.meta.env.DEV;
-
 /**
  * 上一班带出（TK-07，m1/m2 已随 TK-08 收敛到本组件）：**App 级按 duty_date 缓存**——
  * 同班次内开任意卡复用同一份响应（原实现在 SectionView 每开一卡重复拉取），
@@ -1008,7 +1005,7 @@ watch(
     <div class="px-4 pt-8">
       <div class="mb-6 text-center">
         <div class="text-xl font-bold text-slate-800">今日交接</div>
-        <div class="mt-1 text-sm text-slate-500">请使用本人账号登录（一人一号，C-05 实名制）</div>
+        <div class="mt-1 text-sm text-slate-500">请使用本人账号登录（一人一号）</div>
       </div>
 
       <!-- L5（评审修复轮）：本机（不分账号）存在待同步单时登录页提示——共用设备的
@@ -1053,11 +1050,6 @@ watch(
           </van-button>
         </div>
       </van-form>
-
-      <!-- 开发期便利：种子账号提示（《开发种子数据》§一），生产构建不含 -->
-      <div v-if="isDev" class="mt-6 px-4 text-xs leading-relaxed text-slate-400">
-        开发种子账号：zhang / shi / wang / liu（师傅）、chief（科长），统一密码见种子文档§一。
-      </div>
     </div>
   </div>
 
@@ -1242,7 +1234,7 @@ watch(
           取消
         </button>
       </div>
-      <div class="mt-1 text-xs text-slate-400">确认将写入审计日志（技术方案 §5.5）</div>
+      <div class="mt-1 text-xs text-slate-400">确认将写入审计日志</div>
       <div
         v-for="item in pendingConfirms"
         :key="confirmKeyOf(item)"

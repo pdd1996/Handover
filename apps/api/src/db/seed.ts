@@ -435,7 +435,7 @@ async function main(): Promise<void> {
       targetId: String(recD4),
       oldValue: { g1_remaining: '350.0' },
       newValue: { g1_remaining: '400.0' },
-      reason: '天然气 1 号卡充气（剩余量增大 +50），该卡当日用量按 0 计（F1-13）',
+      reason: '天然气 1 号卡充气（剩余量增大 +50），该卡当日用量按 0 计',
     },
     {
       actorId: dutyOf(-1),
@@ -444,7 +444,7 @@ async function main(): Promise<void> {
       targetId: String(recD2),
       oldValue: { status: 'submitted' },
       newValue: { status: 'objection' },
-      reason: '水表读数疑似抄错（F2-06）',
+      reason: '水表读数疑似抄错',
     },
     {
       actorId: dutyOf(-2),
@@ -453,7 +453,7 @@ async function main(): Promise<void> {
       targetId: String(recD2),
       oldValue: { version: 1, water_reading: '7999.0' },
       newValue: { version: 2, water_reading: '7750.0' },
-      reason: '异议退回后修改重提（F2-07）',
+      reason: '异议退回后修改重提',
     },
   ]);
 
@@ -463,7 +463,7 @@ async function main(): Promise<void> {
       userId: dutyOf(0), // D0 当班人（D-1 记录的接班人）
       kind: 'confirm_due',
       title: '交接记录待确认',
-      message: '昨日交接记录已超过 2 小时未确认，请尽快处理（F2-11）',
+      message: '昨日交接记录已超过 2 小时未确认，请尽快处理',
       recordId: recD1,
     },
   ]);

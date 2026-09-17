@@ -231,7 +231,7 @@ onMounted(() => {
         </div>
       </template>
       <div class="text-xs text-gray-400 mb-3">
-        师傅账号实名一人一号（C-05）；开通 / 停用即时生效并写审计；停用即不可登录
+        师傅账号实名一人一号；开通 / 停用即时生效并写审计；停用即不可登录
         （会话存根即删，已在线设备下一次请求被拒）。登录设备记录在审计日志（防共用账号）。
       </div>
       <el-table v-loading="listLoading" :data="items" border data-testid="users-table">
@@ -291,9 +291,9 @@ onMounted(() => {
         </div>
       </template>
       <div class="text-xs text-gray-400 mb-3">
-        最小排班表「日期→人」，一天一人；行内下拉改派即时生效并写审计（audit：schedule.update
-        新旧值）。排班驱动师傅端接班人自动带出（F2-01）与应提交未提交提醒（F6-06）；登录提交人与
-        当日排班不符时，师傅端提交须确认实际当班后方可提交并留痕（F6-05 安全阀）。
+        最小排班表「日期→人」，一天一人；行内下拉改派即时生效并写审计（新旧值留痕）。
+        排班驱动师傅端接班人自动带出与应提交未提交提醒；登录提交人与当日排班不符时，
+        师傅端提交须确认实际当班后方可提交并留痕。
       </div>
       <el-table
         v-loading="schedLoading"

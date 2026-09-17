@@ -182,7 +182,7 @@ export class NotificationsService {
         userId: c.receiverId as number,
         kind: 'confirm_due',
         title: '交接记录待确认',
-        message: `交接单 ${c.recordNo} 已提交超过 ${hours} 小时未确认，请尽快处理（F2-11）`,
+        message: `交接单 ${c.recordNo} 已提交超过 ${hours} 小时未确认，请尽快处理`,
         recordId: c.id,
       })),
     );

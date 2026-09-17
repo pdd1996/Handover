@@ -415,7 +415,7 @@ export class AdminService {
         .limit(1);
       const target = targets[0];
       if (!target || target.role !== 'master') {
-        throw new ApiException('VALIDATION_OUT_OF_RANGE', '值班师傅须为师傅账号（C-05）', {
+        throw new ApiException('VALIDATION_OUT_OF_RANGE', '值班师傅须为师傅账号', {
           missingFields: [SCHEDULE_BAD('user_id', '值班师傅（师傅账号）')],
         });
       }

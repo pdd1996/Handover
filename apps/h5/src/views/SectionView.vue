@@ -87,14 +87,6 @@ const draft = useDraft();
 /** 「草稿已自动保存」指示（F1-09）：本次页面会话内已有至少一次成功落盘，兼作 E2E 同步点 */
 const draftSaved = computed(() => draft.lastSavedAt.value > 0);
 
-/** 填写方式的中文说明（附录 A「填写方式」列） */
-const FILL_LABEL: Record<string, string> = {
-  manual: '手工填写',
-  auto: '系统自动',
-  select: '选择',
-  auto_editable: '自动可改',
-};
-
 /** 服务端已知值（GET /records/today 的 fields[].value；提交前恒 null——草稿在客户端本机，D-T18） */
 function serverValue(name: RecordFieldName): unknown {
   return props.card.fields.find((f) => f.name === name)?.value ?? null;
@@ -199,7 +191,7 @@ const prevBanner = computed<{ tone: 'warn' | 'info'; text: string } | null>(() =
     // F3-07：上一班数据缺失 → 显示“—”并允许补录（TK-14 落地，见下方补录入口）
     return {
       tone: 'info',
-      text: '上一班数据缺失，可比对值显示为“—”；可补录上一班读数用于用量计算（F3-07）',
+      text: '上一班数据缺失，可比对值显示为“—”；可补录上一班读数用于用量计算',
     };
   }
   return null;
@@ -311,13 +303,13 @@ function usagePreviewOf(name: RecordFieldName): string | null {
 
 /** 派生列的只读说明（为何不可编辑：服务端提交时计算固化，契约 §4 第 3 步） */
 const READONLY_HINT: Partial<Record<RecordFieldName, string>> = {
-  water_use: '提交时由服务端自动计算并固化（F3）',
-  e_use: '提交时由服务端自动计算并固化（F3）',
-  gas_use: '提交时由服务端自动计算并固化（F3）',
-  lo_night_use: '跨记录派生值：昨日 20:30 → 今日 8:30 差值（F3-05）',
-  lo_day_use: '自动计算；如需覆盖须填原因留痕（F3-06）',
-  lo_measured_am: '填写读数时自动记录实际测量时刻（DATA-13）',
-  lo_measured_pm: '填写读数时自动记录实际测量时刻（DATA-13）',
+  water_use: '提交时自动计算并固化',
+  e_use: '提交时自动计算并固化',
+  gas_use: '提交时自动计算并固化',
+  lo_night_use: '跨记录派生值：昨日 20:30 → 今日 8:30 差值',
+  lo_day_use: '自动计算；如需覆盖须填原因留痕',
+  lo_measured_am: '填写读数时自动记录实际测量时刻',
+  lo_measured_pm: '填写读数时自动记录实际测量时刻',
 };
 
 interface FieldRow {
@@ -326,7 +318,6 @@ interface FieldRow {
   unit?: string;
   kind: string;
   fill: string;
-  fillLabel: string;
   required: boolean;
   disabled: boolean;
   filled: boolean;
@@ -360,7 +351,6 @@ const rows = computed<FieldRow[]>(() =>
       unit: def?.unit,
       kind: def?.kind ?? '',
       fill: def?.fill ?? '',
-      fillLabel: FILL_LABEL[def?.fill ?? ''] ?? def?.fill ?? '',
       required: def ? isRequiredField(name, get) : f.required,
       disabled: def ? isDisabledField(name, get) : false,
       filled: isFilledValue(value),
@@ -487,7 +477,7 @@ function onComplete(): void {
   ) {
     const item = toMissingField('lo_day_use');
     missingFields.value = [item];
-    errorMessage.value = '覆盖自动计算值须填写原因（留痕，F3-06）';
+    errorMessage.value = '覆盖自动计算值须填写原因（留痕）';
     errorFields.value = new Set([item.field]);
     showToast(errorMessage.value);
     return;
@@ -692,12 +682,10 @@ const headerTitle = computed(() =>
     <div class="bg-white px-4 py-3 text-sm text-slate-600">
       <div>
         点位：<b class="text-slate-800">{{ card.spot_name }}</b>
-        <span class="ml-2 text-xs text-slate-400">sort_no {{ card.sort_no }}</span>
       </div>
       <div class="mt-1">
         覆盖板块：
         <b class="text-slate-800">{{ card.sections.join('、') }}</b>
-        <span class="ml-2 text-xs text-slate-400">共 {{ card.fields.length }} 个字段</span>
       </div>
     </div>
 
@@ -737,7 +725,7 @@ const headerTitle = computed(() =>
         class="mx-3 mt-3 rounded-xl bg-white p-4 text-sm text-slate-500"
         data-testid="elevator-unavailable"
       >
-        暂未获取到电梯清单：请检查网络后重开本卡（预期状态需联网按核对时刻生成，ELE-03）。
+        暂未获取到电梯清单：请检查网络后重开本卡。
       </div>
       <template v-else>
         <div
@@ -745,7 +733,7 @@ const headerTitle = computed(() =>
           data-testid="elevator-checktime"
         >
           预期快照：{{ elevatorRows[0]?.checkTime }} ·
-          核对时刻在你点选的瞬间自动记录（本机），预期按该时刻重算（ELE-03 / ELE-05）
+          核对时刻在你点选的瞬间自动记录，预期按该时刻重算
         </div>
         <div class="mx-3 mt-2 divide-y divide-slate-100 overflow-hidden rounded-xl bg-white">
           <div
@@ -799,7 +787,7 @@ const headerTitle = computed(() =>
               autosize
               rows="1"
               :maxlength="300"
-              placeholder="与预期不一致须填写说明（ELE-04，随交接单留痕）"
+              placeholder="与预期不一致须填写说明（随交接单留痕）"
               class="mt-1 rounded-lg bg-amber-50 px-3"
               :data-testid="`elevator-explanation-${row.id}`"
               @update:model-value="(v: string) => writeExplanation(row, v)"
@@ -812,7 +800,7 @@ const headerTitle = computed(() =>
           </van-button>
         </div>
         <div class="mx-4 mt-3 text-xs leading-relaxed text-slate-400">
-          核对结果自动暂存本机，稍候即自动保存（F1-09）；不一致项提交时将生成标红确认行（ELE-06）。
+          核对结果自动暂存本机，稍候即自动保存；不一致项提交时将生成标红确认行。
           <!-- 「已自动保存」指示（F1-09，与表单卡同口径）：落盘点亮，兼 E2E 同步点 -->
           <span
             v-if="draftSaved"
@@ -868,7 +856,6 @@ const headerTitle = computed(() =>
             <van-tag v-else-if="row.abnormal" type="danger" size="medium">异常</van-tag>
             <van-tag v-else-if="!row.required" plain type="primary" size="medium">选填</van-tag>
           </div>
-          <div class="mt-0.5 text-xs text-slate-400">{{ row.fillLabel }} · {{ row.name }}</div>
 
           <div class="mt-2">
             <!-- 数值：数字键盘（F1-04）；draft 存字符串，校验引擎统一解析；
@@ -989,7 +976,7 @@ const headerTitle = computed(() =>
                 autosize
                 rows="1"
                 :maxlength="200"
-                placeholder="覆盖原因必填（留痕 audit_logs，F3-06）"
+                placeholder="覆盖原因必填（留痕）"
                 class="mt-1 rounded-lg bg-amber-50 px-3"
                 data-testid="input-usage_override_reason"
                 @update:model-value="writeOverrideReason"
@@ -1051,8 +1038,7 @@ const headerTitle = computed(() =>
       </div>
 
       <div class="mx-4 mt-3 text-xs leading-relaxed text-slate-400">
-        填写内容自动暂存本机，稍候即自动保存，关闭页面重开可续填（F1-09）；离线暂存见 TK-15，
-        提交前的汇总预览见 TK-12。
+        填写内容自动暂存本机，稍候即自动保存，关闭页面重开可续填。
         <!-- 「已自动保存」指示（F1-09）：本次页面会话内至少一次成功落盘，兼作 E2E 同步点 -->
         <span v-if="draftSaved" data-testid="draft-saved" class="block font-bold text-emerald-600">
           草稿已自动保存
